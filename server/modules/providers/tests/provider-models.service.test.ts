@@ -448,3 +448,41 @@ test('resolveResumeModel never lets provider session state override the requeste
   assert.equal(model, 'gpt-5.5');
   assert.equal(providerLookups, 0);
 });
+
+test('provider models service preserves stale cache when provider fetch fails or returns empty catalog', async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'provider-model-cache-stale-'));
+  const cachePath = path.join(tempRoot, 'models-cache.json');
+  let currentTime = 1_000;
+  let shouldFail = false;
+
+  try {
+    const service = createProviderModelsService({
+      cachePath,
+      now: () => currentTime,
+      resolveProvider: (provider) => ({
+        models: {
+          getSupportedModels: async () => {
+            if (shouldFail) {
+              throw new Error('CLI execution failure / quota exhausted');
+            }
+            return createModels(`${provider}-cached`);
+          },
+          getCurrentActiveModel: async () => createCurrentActiveModel(`${provider}-active`),
+        },
+      }),
+    });
+
+    const initial = await service.getProviderModels('cursor');
+    assert.equal(initial.models.DEFAULT, 'cursor-cached');
+
+    // Advance time beyond TTL so memory cache expires
+    currentTime += PROVIDER_MODELS_CACHE_TTL_MS + 10_000;
+    shouldFail = true;
+
+    // Fetch should fail, but return stale cache instead of throwing or wiping
+    const fallbackStale = await service.getProviderModels('cursor', { bypassCache: true });
+    assert.equal(fallbackStale.models.DEFAULT, 'cursor-cached');
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});

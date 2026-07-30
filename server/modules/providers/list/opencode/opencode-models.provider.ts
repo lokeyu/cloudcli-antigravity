@@ -18,37 +18,17 @@ import {
 export const OPENCODE_FALLBACK_MODELS: ProviderModelsDefinition = {
   OPTIONS: [
     {
-      value: 'anthropic/claude-sonnet-4-5',
-      label: 'Claude Sonnet 4.5',
-      description: 'anthropic - anthropic/claude-sonnet-4-5',
+      value: 'opencode/big-pickle',
+      label: 'Big Pickle',
+      description: 'opencode - opencode/big-pickle',
     },
     {
-      value: 'anthropic/claude-opus-4-1',
-      label: 'Claude Opus 4.1',
-      description: 'anthropic - anthropic/claude-opus-4-1',
-    },
-    {
-      value: 'anthropic/claude-haiku-4-5',
-      label: 'Claude Haiku 4.5',
-      description: 'anthropic - anthropic/claude-haiku-4-5',
-    },
-    {
-      value: 'openai/gpt-5.1',
-      label: 'GPT-5.1',
-      description: 'openai - openai/gpt-5.1',
-    },
-    {
-      value: 'openai/gpt-5.1-codex',
-      label: 'GPT-5.1 Codex',
-      description: 'openai - openai/gpt-5.1-codex',
-    },
-    {
-      value: 'openai/gpt-5.4-mini',
-      label: 'GPT-5.4 Mini',
-      description: 'openai - openai/gpt-5.4-mini',
+      value: 'openai/gpt-5.4',
+      label: 'GPT-5.4',
+      description: 'openai - openai/gpt-5.4',
     },
   ],
-  DEFAULT: 'anthropic/claude-sonnet-4-5',
+  DEFAULT: 'opencode/big-pickle',
 };
 
 const OPEN_CODE_MODELS_TIMEOUT_MS = 20_000;
@@ -66,6 +46,7 @@ type OpenCodeVerboseModel = {
   id?: string;
   name?: string;
   providerID?: string;
+  status?: string;
   variants?: Record<string, unknown>;
 };
 
@@ -287,6 +268,10 @@ const readOpenCodeEffortValues = (
 };
 
 const mapOpenCodeVerboseModel = (model: OpenCodeVerboseModel): ProviderModelOption | null => {
+  if (model.status && model.status !== 'active') {
+    return null;
+  }
+
   const value = readOpenCodeVerboseModelId(model);
   if (!value || !isSupportedOpenCodeModelId(value)) {
     return null;

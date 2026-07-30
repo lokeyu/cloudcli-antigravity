@@ -102,7 +102,7 @@ const mapCodexModel = (model: CodexCachedModel): ProviderModelOption => {
   };
 };
 
-const buildCodexModelsDefinition = (models: CodexCachedModel[]): ProviderModelsDefinition => {
+export const buildCodexModelsDefinition = (models: CodexCachedModel[]): ProviderModelsDefinition => {
   const sortedModels = [...models]
     .filter((model) => model.visibility === 'list' && model.supported_in_api !== false)
     .sort((left, right) => readCodexPriority(left.priority) - readCodexPriority(right.priority));

@@ -149,6 +149,20 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
   let persistedCacheLoaded = false;
   let persistedCacheLoadPromise: Promise<void> | null = null;
 
+  const getAnyExistingCacheEntry = (
+    provider: LLMProvider,
+    source: ProviderModelsCacheInfo['source'] = 'disk',
+  ): ProviderModelsResult | null => {
+    const entry = memoryCache.get(provider);
+    if (entry && entry.models && Array.isArray(entry.models.OPTIONS) && entry.models.OPTIONS.length > 0) {
+      return {
+        models: entry.models,
+        cache: toProviderModelsCacheInfo(entry, source),
+      };
+    }
+    return null;
+  };
+
   const pruneExpiredMemoryEntry = (
     provider: LLMProvider,
     currentTime: number,
@@ -166,7 +180,6 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
       };
     }
 
-    memoryCache.delete(provider);
     return null;
   };
 
@@ -178,10 +191,9 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
     if (!persistedCacheLoadPromise) {
       persistedCacheLoadPromise = (async () => {
         const cacheFile = await readProviderModelsCacheFile(cachePath);
-        const currentTime = now();
 
         for (const [provider, entry] of Object.entries(cacheFile?.entries ?? {})) {
-          if (entry.expiresAt > currentTime) {
+          if (entry.models && Array.isArray(entry.models.OPTIONS) && entry.models.OPTIONS.length > 0) {
             memoryCache.set(provider as LLMProvider, entry);
           }
         }
@@ -224,11 +236,27 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
   ): Promise<ProviderModelsResult> => {
     const request = resolveProvider(provider).models.getSupportedModels()
       .then(async (models) => {
+        if (!models || !Array.isArray(models.OPTIONS) || models.OPTIONS.length === 0) {
+          await loadPersistedCache();
+          const stale = getAnyExistingCacheEntry(provider);
+          if (stale) {
+            return stale;
+          }
+        }
+
         const entry = await setCacheEntry(provider, models);
         return {
           models,
           cache: toProviderModelsCacheInfo(entry, 'fresh'),
         };
+      })
+      .catch(async (error) => {
+        await loadPersistedCache();
+        const stale = getAnyExistingCacheEntry(provider);
+        if (stale) {
+          return stale;
+        }
+        throw error;
       })
       .finally(() => {
         pendingRequests.delete(provider);
