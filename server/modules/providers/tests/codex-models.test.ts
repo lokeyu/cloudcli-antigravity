@@ -6,6 +6,32 @@ import {
   CODEX_FALLBACK_MODELS,
   CodexProviderModels,
 } from '@/modules/providers/list/codex/codex-models.provider.js';
+import { ProviderModelsDiscoveryError } from '@/shared/provider-models-discovery.js';
+
+/**
+ * Asserts one rejection is a discovery failure carrying the Codex catalog.
+ *
+ * The catalog has to ride along on the error: it is the only thing
+ * `providerModelsService` can answer with when no snapshot exists.
+ */
+const assertCodexDiscoveryFailure = (error: unknown): true => {
+  assert.ok(
+    error instanceof ProviderModelsDiscoveryError,
+    `expected a ProviderModelsDiscoveryError, got ${String(error)}`,
+  );
+  assert.equal(error.name, 'ProviderModelsDiscoveryError');
+  assert.deepEqual(error.fallback, CODEX_FALLBACK_MODELS);
+  return true;
+};
+
+/** A models cache holding one listable model, serialized the way Codex writes it. */
+const createCodexCacheJson = (): string => JSON.stringify({
+  models: [
+    { slug: 'gpt-5.6-sol', display_name: 'GPT-5.6 Sol', priority: 1, visibility: 'list' },
+    { slug: 'gpt-5.4', display_name: 'GPT-5.4', priority: 7, visibility: 'list' },
+    { slug: 'codex-auto-review', priority: 0, visibility: 'hide' },
+  ],
+});
 
 test('Codex models picks model with best numerical priority as default', () => {
   const definition = buildCodexModelsDefinition([
@@ -78,10 +104,98 @@ test('Codex models maps reasoning levels correctly', () => {
   ]);
 });
 
-test('CodexProviderModels falls back gracefully when cache file is missing or invalid', async () => {
-  const provider = new CodexProviderModels();
+test('CodexProviderModels returns the live catalog from a valid models cache', async () => {
+  const provider = new CodexProviderModels({
+    readModelsCache: async () => createCodexCacheJson(),
+  });
+
   const definition = await provider.getSupportedModels();
 
-  assert.ok(definition.OPTIONS.length > 0);
-  assert.ok(typeof definition.DEFAULT === 'string');
+  // Priority order is preserved and the hidden entry never becomes selectable.
+  assert.deepEqual(definition.OPTIONS.map((option) => option.value), ['gpt-5.6-sol', 'gpt-5.4']);
+  assert.deepEqual(definition.OPTIONS.map((option) => option.label), ['GPT-5.6 Sol', 'GPT-5.4']);
+  assert.equal(definition.DEFAULT, 'gpt-5.6-sol');
+});
+
+test('CodexProviderModels reports a missing models cache as a failed discovery', async () => {
+  const missingFile = Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' });
+  const provider = new CodexProviderModels({
+    readModelsCache: async () => {
+      throw missingFile;
+    },
+  });
+
+  await assert.rejects(() => provider.getSupportedModels(), (error: unknown) => {
+    assertCodexDiscoveryFailure(error);
+    // The original read failure stays attached so logs keep naming the real cause.
+    assert.equal((error as ProviderModelsDiscoveryError).cause, missingFile);
+    return true;
+  });
+});
+
+test('CodexProviderModels reports an unparseable models cache as a failed discovery', async () => {
+  for (const raw of ['', 'not json at all', '{"models": [', '\u0000\u0001binary garbage']) {
+    const provider = new CodexProviderModels({ readModelsCache: async () => raw });
+
+    await assert.rejects(
+      () => provider.getSupportedModels(),
+      assertCodexDiscoveryFailure,
+      `expected discovery to fail for cache contents ${JSON.stringify(raw)}`,
+    );
+  }
+});
+
+test('CodexProviderModels reports a cache without listable models as a failed discovery', async () => {
+  const cacheVariants = [
+    JSON.stringify({ models: [] }),
+    JSON.stringify({ models: [{ slug: 'codex-auto-review', priority: 1, visibility: 'hide' }] }),
+    JSON.stringify({ models: [{ slug: 'gpt-5.4', visibility: 'list', supported_in_api: false }] }),
+    JSON.stringify({ models: [{ display_name: 'no slug at all', visibility: 'list' }] }),
+    JSON.stringify({ unexpected: 'shape' }),
+  ];
+
+  for (const raw of cacheVariants) {
+    const provider = new CodexProviderModels({ readModelsCache: async () => raw });
+
+    await assert.rejects(
+      () => provider.getSupportedModels(),
+      assertCodexDiscoveryFailure,
+      `expected discovery to fail for cache contents ${raw}`,
+    );
+  }
+});
+
+test('CodexProviderModels keeps naming a default model when discovery fails', async () => {
+  const provider = new CodexProviderModels({
+    readModelsCache: async () => {
+      throw new Error('ENOENT: no such file');
+    },
+    readConfig: async () => {
+      throw new Error('ENOENT: no such file');
+    },
+  });
+
+  assert.deepEqual(await provider.getCurrentActiveModel(), {
+    model: CODEX_FALLBACK_MODELS.DEFAULT,
+  });
+});
+
+test('CodexProviderModels reads the configured model even when discovery fails', async () => {
+  const provider = new CodexProviderModels({
+    readModelsCache: async () => {
+      throw new Error('ENOENT: no such file');
+    },
+    readConfig: async () => 'model = "gpt-5.6-sol"\n',
+  });
+
+  assert.deepEqual(await provider.getCurrentActiveModel(), { model: 'gpt-5.6-sol' });
+});
+
+test('CodexProviderModels falls back to the catalog default when the config names no model', async () => {
+  const provider = new CodexProviderModels({
+    readModelsCache: async () => createCodexCacheJson(),
+    readConfig: async () => 'approval_policy = "never"\n',
+  });
+
+  assert.deepEqual(await provider.getCurrentActiveModel(), { model: 'gpt-5.6-sol' });
 });

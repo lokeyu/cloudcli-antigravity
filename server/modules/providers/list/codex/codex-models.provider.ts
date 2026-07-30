@@ -5,6 +5,7 @@ import path from 'node:path';
 import TOML from '@iarna/toml';
 
 import type { IProviderModels } from '@/shared/interfaces.js';
+import { catalogOrFallback, ProviderModelsDiscoveryError } from '@/shared/provider-models-discovery.js';
 import type {
   ProviderCurrentActiveModel,
   ProviderModelOption,
@@ -130,35 +131,89 @@ export const buildCodexModelsDefinition = (models: CodexCachedModel[]): Provider
   };
 };
 
+/** Seam for tests: the real readers touch the files Codex keeps under `~/.codex`. */
+type CodexProviderModelsDependencies = {
+  readModelsCache?: () => Promise<string>;
+  readConfig?: () => Promise<string>;
+};
+
 export class CodexProviderModels implements IProviderModels {
+  private readonly readModelsCache: () => Promise<string>;
+
+  private readonly readConfig: () => Promise<string>;
+
+  constructor(dependencies: CodexProviderModelsDependencies = {}) {
+    this.readModelsCache = dependencies.readModelsCache
+      ?? (() => readFile(CODEX_MODELS_CACHE_PATH, 'utf8'));
+    this.readConfig = dependencies.readConfig
+      ?? (() => readFile(CODEX_CONFIG_PATH, 'utf8'));
+  }
+
+  /**
+   * Reads the catalog Codex caches in `~/.codex/models_cache.json`.
+   *
+   * Rejects with `ProviderModelsDiscoveryError` when the file is missing or
+   * unreadable, when it does not parse as JSON, and when nothing in it survives
+   * the visibility filter. The built-in catalog rides along on the error so
+   * `providerModelsService` can prefer an existing snapshot over it instead of
+   * recording a placeholder as a live reading.
+   */
   async getSupportedModels(): Promise<ProviderModelsDefinition> {
+    let models: CodexCachedModel[];
+
     try {
-      const raw = await readFile(CODEX_MODELS_CACHE_PATH, 'utf8');
+      const raw = await this.readModelsCache();
       const parsed = readObjectRecord(JSON.parse(raw));
-      const models = Array.isArray(parsed?.models)
+      models = Array.isArray(parsed?.models)
         ? parsed.models.filter(isCodexCachedModel)
         : [];
-
-      return buildCodexModelsDefinition(models);
-    } catch {
-      return CODEX_FALLBACK_MODELS;
+    } catch (error) {
+      throw new ProviderModelsDiscoveryError(
+        CODEX_FALLBACK_MODELS,
+        'Unable to read the Codex model cache',
+        { cause: error },
+      );
     }
+
+    const definition = buildCodexModelsDefinition(models);
+    // The builder answers with the shipped catalog itself when the cache held
+    // nothing listable, so identity is what distinguishes "read a catalog" from
+    // "read a file with no models in it" without duplicating its filter rules.
+    if (definition === CODEX_FALLBACK_MODELS) {
+      throw new ProviderModelsDiscoveryError(
+        CODEX_FALLBACK_MODELS,
+        'The Codex model cache listed no selectable models',
+      );
+    }
+
+    return definition;
+  }
+
+  /**
+   * Reads the catalog for default-naming purposes only.
+   *
+   * `getCurrentActiveModel` needs a model name to fall back on, not proof that
+   * the cache was readable, so a failed discovery resolves to the built-in
+   * catalog here rather than propagating.
+   */
+  private async readCatalogForDefault(): Promise<ProviderModelsDefinition> {
+    return catalogOrFallback(() => this.getSupportedModels());
   }
 
   async getCurrentActiveModel(): Promise<ProviderCurrentActiveModel> {
     try {
-      const raw = await readFile(CODEX_CONFIG_PATH, 'utf8');
+      const raw = await this.readConfig();
       const parsed = readObjectRecord(TOML.parse(raw));
       const model = readOptionalString(parsed?.model);
       if (!model) {
-        return buildDefaultProviderCurrentActiveModel(await this.getSupportedModels());
+        return buildDefaultProviderCurrentActiveModel(await this.readCatalogForDefault());
       }
 
       return {
         model,
       };
     } catch {
-      return buildDefaultProviderCurrentActiveModel(await this.getSupportedModels());
+      return buildDefaultProviderCurrentActiveModel(await this.readCatalogForDefault());
     }
   }
 }

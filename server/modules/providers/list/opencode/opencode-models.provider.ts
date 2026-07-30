@@ -3,6 +3,7 @@ import crossSpawn from 'cross-spawn';
 
 import { sessionsDb } from '@/modules/database/index.js';
 import type { IProviderModels } from '@/shared/interfaces.js';
+import { catalogOrFallback, ProviderModelsDiscoveryError } from '@/shared/provider-models-discovery.js';
 import type {
   ProviderCurrentActiveModel,
   ProviderModelOption,
@@ -422,29 +423,88 @@ const runOpenCodeModelsCommand = (): Promise<string> => new Promise((resolve, re
   });
 });
 
+/** Seam for tests: the real runner shells out to `opencode models --verbose`. */
+type OpenCodeProviderModelsDependencies = {
+  runModelsCommand?: () => Promise<string>;
+};
+
+/** One discovery failure, always carrying the shipped catalog. */
+const openCodeDiscoveryFailure = (
+  message: string,
+  cause?: unknown,
+): ProviderModelsDiscoveryError => new ProviderModelsDiscoveryError(
+  OPENCODE_FALLBACK_MODELS,
+  message,
+  { cause },
+);
+
 export class OpenCodeProviderModels implements IProviderModels {
+  private readonly runModelsCommand: () => Promise<string>;
+
+  constructor(dependencies: OpenCodeProviderModelsDependencies = {}) {
+    this.runModelsCommand = dependencies.runModelsCommand ?? runOpenCodeModelsCommand;
+  }
+
+  /**
+   * Reads the live catalog from `opencode models --verbose`.
+   *
+   * The two-stage reading is unchanged: verbose JSON blocks first, then the
+   * plain one-id-per-line output for CLI versions that print no JSON. Only when
+   * neither stage yields a usable model does this reject with
+   * `ProviderModelsDiscoveryError`, so a run that listed some models alongside
+   * unparseable noise still counts as a successful discovery.
+   */
   async getSupportedModels(): Promise<ProviderModelsDefinition> {
+    let stdout: string;
+
     try {
-      const stdout = await runOpenCodeModelsCommand();
-      const verboseModels = parseOpenCodeVerboseModelsStdout(stdout);
-      if (verboseModels.length > 0) {
-        return buildOpenCodeDefinitionFromVerboseModels(verboseModels);
-      }
-
-      const ids = parseOpenCodeModelsStdout(stdout);
-      if (ids.length === 0) {
-        return OPENCODE_FALLBACK_MODELS;
-      }
-
-      return buildOpenCodeDefinitionFromIds(ids);
-    } catch {
-      return OPENCODE_FALLBACK_MODELS;
+      stdout = await this.runModelsCommand();
+    } catch (error) {
+      // A missing CLI, a non-zero exit, and the timeout are all "no catalog".
+      throw openCodeDiscoveryFailure('Unable to discover OpenCode models', error);
     }
+
+    const verboseModels = parseOpenCodeVerboseModelsStdout(stdout);
+    if (verboseModels.length > 0) {
+      const definition = buildOpenCodeDefinitionFromVerboseModels(verboseModels);
+      // The builder answers with the shipped catalog itself once every block was
+      // filtered out (inactive, or an unsupported upstream provider); identity
+      // keeps that check here from restating its filter rules.
+      if (definition === OPENCODE_FALLBACK_MODELS) {
+        throw openCodeDiscoveryFailure('opencode models listed no selectable models');
+      }
+
+      return definition;
+    }
+
+    const ids = parseOpenCodeModelsStdout(stdout);
+    if (ids.length === 0) {
+      throw openCodeDiscoveryFailure('opencode models printed no usable model ids');
+    }
+
+    const definition = buildOpenCodeDefinitionFromIds(ids);
+    if (definition.OPTIONS.length === 0) {
+      // Every id belonged to an upstream provider this app does not offer.
+      throw openCodeDiscoveryFailure('opencode models listed no supported model ids');
+    }
+
+    return definition;
+  }
+
+  /**
+   * Reads the catalog for default-naming purposes only.
+   *
+   * `getCurrentActiveModel` needs a model name to fall back on, not proof that
+   * the CLI answered, so a failed discovery resolves to the built-in catalog
+   * here rather than propagating.
+   */
+  private async readCatalogForDefault(): Promise<ProviderModelsDefinition> {
+    return catalogOrFallback(() => this.getSupportedModels());
   }
 
   async getCurrentActiveModel(sessionId?: string): Promise<ProviderCurrentActiveModel> {
     if (!sessionId?.trim()) {
-      return buildDefaultProviderCurrentActiveModel(await this.getSupportedModels());
+      return buildDefaultProviderCurrentActiveModel(await this.readCatalogForDefault());
     }
 
     // OpenCode's `session` table is keyed by its own session id, so the stable
@@ -491,6 +551,6 @@ export class OpenCodeProviderModels implements IProviderModels {
       // Fall through to the provider default when OpenCode session lookup fails.
     }
 
-    return buildDefaultProviderCurrentActiveModel(await this.getSupportedModels());
+    return buildDefaultProviderCurrentActiveModel(await this.readCatalogForDefault());
   }
 }

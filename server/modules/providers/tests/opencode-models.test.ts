@@ -9,6 +9,23 @@ import {
   OPENCODE_FALLBACK_MODELS,
   OpenCodeProviderModels,
 } from '@/modules/providers/list/opencode/opencode-models.provider.js';
+import { ProviderModelsDiscoveryError } from '@/shared/provider-models-discovery.js';
+
+/**
+ * Asserts one rejection is a discovery failure carrying the OpenCode catalog.
+ *
+ * The catalog has to ride along on the error: it is the only thing
+ * `providerModelsService` can answer with when no snapshot exists.
+ */
+const assertOpenCodeDiscoveryFailure = (error: unknown): true => {
+  assert.ok(
+    error instanceof ProviderModelsDiscoveryError,
+    `expected a ProviderModelsDiscoveryError, got ${String(error)}`,
+  );
+  assert.equal(error.name, 'ProviderModelsDiscoveryError');
+  assert.deepEqual(error.fallback, OPENCODE_FALLBACK_MODELS);
+  return true;
+};
 
 test('OpenCode models provider parses plain CLI output and removes duplicates', () => {
   const ids = parseOpenCodeModelsStdout(`
@@ -170,10 +187,142 @@ test('OpenCode fallback catalog does not contain old obsolete model IDs', () => 
   assert.equal(OPENCODE_FALLBACK_MODELS.DEFAULT, 'opencode/big-pickle');
 });
 
-test('OpenCodeProviderModels falls back gracefully when discovery fails', async () => {
-  const provider = new OpenCodeProviderModels();
+test('OpenCodeProviderModels returns the live catalog from verbose output', async () => {
+  const provider = new OpenCodeProviderModels({
+    runModelsCommand: async () => `
+opencode/big-pickle
+{
+  "id": "big-pickle",
+  "providerID": "opencode",
+  "name": "Big Pickle",
+  "status": "active"
+}
+anthropic/claude-sonnet-5
+{
+  "id": "claude-sonnet-5",
+  "providerID": "anthropic",
+  "name": "Claude Sonnet 5",
+  "status": "active"
+}
+`,
+  });
+
   const definition = await provider.getSupportedModels();
 
-  assert.ok(definition.OPTIONS.length > 0);
-  assert.ok(typeof definition.DEFAULT === 'string');
+  assert.deepEqual(
+    definition.OPTIONS.map((option) => option.value),
+    ['opencode/big-pickle', 'anthropic/claude-sonnet-5'],
+  );
+  assert.equal(definition.DEFAULT, 'opencode/big-pickle');
+});
+
+test('OpenCodeProviderModels still reads plain output when no verbose block is printed', async () => {
+  const provider = new OpenCodeProviderModels({
+    runModelsCommand: async () => `
+opencode/big-pickle
+openai/gpt-5.5-pro
+`,
+  });
+
+  const definition = await provider.getSupportedModels();
+
+  assert.deepEqual(
+    definition.OPTIONS.map((option) => option.value),
+    ['opencode/big-pickle', 'openai/gpt-5.5-pro'],
+  );
+  assert.equal(definition.DEFAULT, 'opencode/big-pickle');
+});
+
+test('OpenCodeProviderModels keeps the models it recognized in partially valid output', async () => {
+  const provider = new OpenCodeProviderModels({
+    runModelsCommand: async () => `
+Loading providers...
+openai/gpt-5.5-pro
+this line is not a model id
+{ "half": "a verbose block"
+opencode/big-pickle
+`,
+  });
+
+  const definition = await provider.getSupportedModels();
+
+  assert.deepEqual(
+    definition.OPTIONS.map((option) => option.value),
+    ['openai/gpt-5.5-pro', 'opencode/big-pickle'],
+  );
+  assert.equal(definition.DEFAULT, 'opencode/big-pickle');
+});
+
+test('OpenCodeProviderModels reports empty output as a failed discovery', async () => {
+  for (const stdout of ['', '   \n\n']) {
+    const provider = new OpenCodeProviderModels({ runModelsCommand: async () => stdout });
+
+    await assert.rejects(
+      () => provider.getSupportedModels(),
+      assertOpenCodeDiscoveryFailure,
+      `expected discovery to fail for stdout ${JSON.stringify(stdout)}`,
+    );
+  }
+});
+
+test('OpenCodeProviderModels reports fully malformed output as a failed discovery', async () => {
+  const provider = new OpenCodeProviderModels({
+    runModelsCommand: async () => 'Loading providers...\nno models are connected\n<<<>>>\n',
+  });
+
+  await assert.rejects(() => provider.getSupportedModels(), assertOpenCodeDiscoveryFailure);
+});
+
+test('OpenCodeProviderModels reports output with only unsupported providers as a failed discovery', async () => {
+  const verboseProvider = new OpenCodeProviderModels({
+    runModelsCommand: async () => `
+google/model-alpha
+{
+  "id": "model-alpha",
+  "providerID": "google",
+  "name": "Model Alpha"
+}
+`,
+  });
+  await assert.rejects(() => verboseProvider.getSupportedModels(), assertOpenCodeDiscoveryFailure);
+
+  const plainProvider = new OpenCodeProviderModels({
+    runModelsCommand: async () => 'google/model-alpha\ngoogle/model-beta\n',
+  });
+  await assert.rejects(() => plainProvider.getSupportedModels(), assertOpenCodeDiscoveryFailure);
+});
+
+test('OpenCodeProviderModels reports a failed CLI run as a failed discovery', async () => {
+  const runFailure = new Error('opencode models exited with code 1');
+  const provider = new OpenCodeProviderModels({
+    runModelsCommand: async () => {
+      throw runFailure;
+    },
+  });
+
+  await assert.rejects(() => provider.getSupportedModels(), (error: unknown) => {
+    assertOpenCodeDiscoveryFailure(error);
+    // The original failure stays attached so logs keep naming the real cause.
+    assert.equal((error as ProviderModelsDiscoveryError).cause, runFailure);
+    return true;
+  });
+});
+
+test('OpenCodeProviderModels keeps naming a default model when discovery fails', async () => {
+  const provider = new OpenCodeProviderModels({
+    runModelsCommand: async () => {
+      throw new Error('opencode models timed out');
+    },
+  });
+
+  // No session id: answers straight from the catalog.
+  assert.deepEqual(await provider.getCurrentActiveModel(), {
+    model: OPENCODE_FALLBACK_MODELS.DEFAULT,
+  });
+
+  // A session that OpenCode has no row for falls through the same path.
+  assert.deepEqual(
+    await provider.getCurrentActiveModel('session-that-does-not-exist'),
+    { model: OPENCODE_FALLBACK_MODELS.DEFAULT },
+  );
 });
