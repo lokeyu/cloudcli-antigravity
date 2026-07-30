@@ -1,6 +1,7 @@
 import crossSpawn from 'cross-spawn';
 
 import type { IProviderModels } from '@/shared/interfaces.js';
+import { catalogOrFallback, ProviderModelsDiscoveryError } from '@/shared/provider-models-discovery.js';
 import type {
   ProviderCurrentActiveModel,
   ProviderModelOption,
@@ -150,6 +151,11 @@ export const parseAntigravityModelsStdout = (stdout: string): ProviderModelOptio
 /**
  * Builds the provider catalog from parsed `agy models` rows.
  *
+ * Answering with the shipped catalog for an empty row list keeps this a total
+ * function for direct callers; `AntigravityProviderModels.getSupportedModels()`
+ * rejects before reaching it in that case, so the substitution is never mistaken
+ * for a live reading.
+ *
  * Exported for the provider tests and `AntigravityProviderModels`.
  */
 export const buildAntigravityDefinition = (
@@ -274,13 +280,63 @@ export const readAntigravityModelOptions = async (): Promise<ProviderModelOption
   return inFlightModelsRead;
 };
 
+/** Seam for tests: the real reader shells out to `agy models`. */
+type AntigravityProviderModelsDependencies = {
+  readModelOptions?: () => Promise<ProviderModelOption[]>;
+};
+
 export class AntigravityProviderModels implements IProviderModels {
+  private readonly readModelOptions: () => Promise<ProviderModelOption[]>;
+
+  constructor(dependencies: AntigravityProviderModelsDependencies = {}) {
+    this.readModelOptions = dependencies.readModelOptions ?? readAntigravityModelOptions;
+  }
+
+  /**
+   * Reads the live catalog from `agy models`.
+   *
+   * Rejects with `ProviderModelsDiscoveryError` when the CLI cannot be run, exits
+   * non-zero, or times out, and equally when it exits cleanly with nothing that
+   * parses as a model row — which is what an unauthenticated CLI prints. The
+   * built-in catalog rides along on the error instead of being returned here, so
+   * `providerModelsService` can prefer an existing snapshot over it.
+   *
+   * The reject contract stops at this method: `readAntigravityModelOptions()`
+   * stays a plain reader because `AntigravityProviderAuth` reads an empty list as
+   * "no usable credentials" and must keep being able to see it.
+   */
   async getSupportedModels(): Promise<ProviderModelsDefinition> {
+    let options: ProviderModelOption[];
+
     try {
-      return buildAntigravityDefinition(await readAntigravityModelOptions());
-    } catch {
-      return ANTIGRAVITY_FALLBACK_MODELS;
+      options = await this.readModelOptions();
+    } catch (error) {
+      throw new ProviderModelsDiscoveryError(
+        ANTIGRAVITY_FALLBACK_MODELS,
+        'Unable to discover Antigravity models',
+        { cause: error },
+      );
     }
+
+    if (options.length === 0) {
+      throw new ProviderModelsDiscoveryError(
+        ANTIGRAVITY_FALLBACK_MODELS,
+        'agy models listed no usable models',
+      );
+    }
+
+    return buildAntigravityDefinition(options);
+  }
+
+  /**
+   * Reads the catalog for default-naming purposes only.
+   *
+   * `getCurrentActiveModel` needs a model name to fall back on, not proof that
+   * the CLI answered, so a failed discovery resolves to the built-in catalog
+   * here rather than propagating.
+   */
+  private async readCatalogForDefault(): Promise<ProviderModelsDefinition> {
+    return catalogOrFallback(() => this.getSupportedModels());
   }
 
   /**
@@ -290,6 +346,6 @@ export class AntigravityProviderModels implements IProviderModels {
    * only ever needs to answer with the catalog default.
    */
   async getCurrentActiveModel(_sessionId?: string): Promise<ProviderCurrentActiveModel> {
-    return buildDefaultProviderCurrentActiveModel(await this.getSupportedModels());
+    return buildDefaultProviderCurrentActiveModel(await this.readCatalogForDefault());
   }
 }
