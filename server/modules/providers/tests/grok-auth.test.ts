@@ -165,6 +165,52 @@ test('Grok auth stays authenticated when the weekly agent quota is exhausted', a
   assert.equal(status.error, undefined);
 });
 
+test('Grok auth reports authenticated from valid inspect JSON shape', async () => {
+  const inspectJson = JSON.stringify({
+    grokVersion: '0.2.114',
+    channel: 'stable',
+    cwd: '/home/claude/workspace',
+    permissions: {},
+    loginPolicy: { apiKeyAuthDisabled: false },
+    skills: [],
+    agents: [],
+  });
+
+  const { status } = await readStatusWithFakeCli({ stdout: inspectJson });
+
+  assert.deepEqual(status, {
+    installed: true,
+    provider: 'grok',
+    authenticated: true,
+    email: null,
+    method: 'grok_cli',
+  });
+});
+
+test('Grok auth stays authenticated when inspect JSON has no email field', async () => {
+  const inspectJson = JSON.stringify({
+    grokVersion: '0.2.114',
+    permissions: {},
+  });
+
+  const { status } = await readStatusWithFakeCli({ stdout: inspectJson });
+
+  assert.equal(status.installed, true);
+  assert.equal(status.authenticated, true);
+  assert.equal(status.email, null);
+});
+
+test('Grok auth handles malformed JSON output with safe error message', async () => {
+  const { status } = await readStatusWithFakeCli({
+    stdout: '{ "grokVersion": "0.2.114", malformed...',
+    exitCode: 0,
+  });
+
+  assert.equal(status.installed, true);
+  assert.equal(status.authenticated, false);
+  assert.equal(status.error, 'Grok CLI returned malformed JSON output');
+});
+
 // ---------------------------
 // Unauthenticated and failure states
 

@@ -98,11 +98,35 @@ const buildStatus = (
 });
 
 /**
+ * Safely parses CLI output when structured as JSON.
+ *
+ * Distinguishes valid JSON objects (e.g. from `grok inspect --json`) from malformed output.
+ */
+const tryParseInspectJson = (
+  stdout: string,
+): { isJson: boolean; parsed?: Record<string, unknown>; malformed: boolean } => {
+  const trimmed = stdout.trim();
+  if (!trimmed.startsWith('{')) {
+    return { isJson: false, malformed: false };
+  }
+
+  try {
+    const value = JSON.parse(trimmed);
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return { isJson: true, parsed: value as Record<string, unknown>, malformed: false };
+    }
+    return { isJson: true, malformed: true };
+  } catch {
+    return { isJson: true, malformed: true };
+  }
+};
+
+/**
  * Turns one probe outcome into the shared auth status.
  *
- * A clean exit that shows either the login banner or a parsed catalog is proof
- * of usable credentials; the two are checked independently so a future CLI that
- * drops the banner still reports correctly.
+ * A clean exit that shows either the login banner, a parsed catalog, or valid inspect JSON
+ * is proof of usable credentials; these are checked independently so a future CLI that
+ * alters its output format still reports correctly.
  */
 const buildGrokAuthStatus = (outcome: GrokProbeOutcome): ProviderAuthStatus => {
   if (outcome.kind === 'missing') {
@@ -134,13 +158,6 @@ const buildGrokAuthStatus = (outcome: GrokProbeOutcome): ProviderAuthStatus => {
 
   const { stdout, stderr, exitCode } = outcome;
 
-  if (exitCode === 0) {
-    const hasCatalog = parseGrokModelsStdout(stdout).options.length > 0;
-    if (LOGGED_IN_BANNER.test(stdout) || hasCatalog) {
-      return buildStatus({ installed: true, authenticated: true, method: 'grok_cli' });
-    }
-  }
-
   if (looksLoggedOut(`${stdout}\n${stderr}`)) {
     return buildStatus({
       installed: true,
@@ -149,6 +166,55 @@ const buildGrokAuthStatus = (outcome: GrokProbeOutcome): ProviderAuthStatus => {
       error: 'Grok CLI is not logged in. Run `grok login`.',
     });
   }
+
+  if (exitCode === 0) {
+    const jsonInfo = tryParseInspectJson(stdout);
+    if (jsonInfo.isJson) {
+      if (jsonInfo.malformed) {
+        console.error('[GrokAuth] CLI probe returned malformed JSON', {
+          command: 'grok',
+          exitCode,
+          errorType: 'malformed_json',
+        });
+        return buildStatus({
+          installed: true,
+          authenticated: false,
+          method: null,
+          error: 'Grok CLI returned malformed JSON output',
+        });
+      }
+
+      if (jsonInfo.parsed) {
+        return buildStatus({ installed: true, authenticated: true, method: 'grok_cli' });
+      }
+    }
+
+    const hasCatalog = parseGrokModelsStdout(stdout).options.length > 0;
+    if (LOGGED_IN_BANNER.test(stdout) || hasCatalog) {
+      return buildStatus({ installed: true, authenticated: true, method: 'grok_cli' });
+    }
+  }
+
+  const jsonInfo = tryParseInspectJson(stdout);
+  if (jsonInfo.isJson && jsonInfo.malformed) {
+    console.error('[GrokAuth] CLI probe returned malformed JSON', {
+      command: 'grok',
+      exitCode,
+      errorType: 'malformed_json',
+    });
+    return buildStatus({
+      installed: true,
+      authenticated: false,
+      method: null,
+      error: 'Grok CLI returned malformed JSON output',
+    });
+  }
+
+  console.error('[GrokAuth] Unexpected CLI probe failure', {
+    command: 'grok',
+    exitCode,
+    errorType: 'unexpected_cli_failure',
+  });
 
   return buildStatus({
     installed: true,
