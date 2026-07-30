@@ -44,6 +44,7 @@
     "build:client": "vite build",
     "prebuild:server": "node -e \"require('node:fs').rmSync('dist-server', { recursive: true, force: true })\"",
     "build:server": "tsc -p server/tsconfig.json && tsc-alias -p server/tsconfig.json",
+    "postbuild:server": "node -e \"require('node:fs').chmodSync('dist-server/server/modules/cli/cli.js', 0o755)\"",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p server/tsconfig.json",
     "test": "node --import tsx --test \"server/**/*.test.ts\" \"server/**/*.test.js\"",
