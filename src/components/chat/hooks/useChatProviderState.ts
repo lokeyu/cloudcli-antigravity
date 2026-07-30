@@ -22,9 +22,10 @@ const FALLBACK_DEFAULT_MODEL: Record<LLMProvider, string> = {
   codex: 'gpt-5.4',
   opencode: 'anthropic/claude-sonnet-4-5',
   antigravity: 'gemini-3.6-flash-high',
+  grok: 'grok-4.5',
 };
 
-const PROVIDERS: LLMProvider[] = ['claude', 'cursor', 'codex', 'opencode', 'antigravity'];
+const PROVIDERS: LLMProvider[] = ['claude', 'cursor', 'codex', 'opencode', 'antigravity', 'grok'];
 
 const readStoredProvider = (): LLMProvider => {
   const storedProvider = localStorage.getItem('selected-provider');
@@ -45,6 +46,7 @@ const FALLBACK_PERMISSION_MODES: Record<LLMProvider, PermissionMode[]> = {
   codex: ['default', 'acceptEdits', 'bypassPermissions'],
   opencode: ['default', 'acceptEdits', 'bypassPermissions', 'plan'],
   antigravity: ['default', 'acceptEdits', 'bypassPermissions', 'plan'],
+  grok: ['default', 'acceptEdits', 'auto', 'bypassPermissions', 'plan'],
 };
 
 type ProviderCapabilities = {
@@ -119,6 +121,9 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
   const [antigravityModel, setAntigravityModel] = useState<string>(() => {
     return localStorage.getItem('antigravity-model') || FALLBACK_DEFAULT_MODEL.antigravity;
   });
+  const [grokModel, setGrokModel] = useState<string>(() => {
+    return localStorage.getItem('grok-model') || FALLBACK_DEFAULT_MODEL.grok;
+  });
 
   /**
    * Backend-owned capability matrix keyed by provider. Drives the permission
@@ -167,8 +172,14 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
       return;
     }
 
-    setAntigravityModel(model);
-    localStorage.setItem('antigravity-model', model);
+    if (targetProvider === 'antigravity') {
+      setAntigravityModel(model);
+      localStorage.setItem('antigravity-model', model);
+      return;
+    }
+
+    setGrokModel(model);
+    localStorage.setItem('grok-model', model);
   }, []);
 
   const setStoredProviderEffort = useCallback((targetProvider: LLMProvider, effort: string) => {
@@ -372,7 +383,8 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     codex: codexModel,
     opencode: opencodeModel,
     antigravity: antigravityModel,
-  }), [claudeModel, cursorModel, codexModel, opencodeModel, antigravityModel]);
+    grok: grokModel,
+  }), [claudeModel, cursorModel, codexModel, opencodeModel, antigravityModel, grokModel]);
 
   useEffect(() => {
     const claude = providerModelCatalog.claude;
@@ -438,6 +450,19 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
       }
     }
   }, [providerModelCatalog.antigravity, antigravityModel]);
+
+  useEffect(() => {
+    const grok = providerModelCatalog.grok;
+    if (grok) {
+      const next = pickStoredOrCurrent('grok-model', grokModel, grok);
+      if (next !== grokModel) {
+        setGrokModel(next);
+      }
+      if (localStorage.getItem('grok-model') !== next) {
+        localStorage.setItem('grok-model', next);
+      }
+    }
+  }, [providerModelCatalog.grok, grokModel]);
 
   useEffect(() => {
     const nextEfforts: Partial<Record<LLMProvider, string>> = {};
@@ -645,6 +670,8 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     setOpenCodeModel,
     antigravityModel,
     setAntigravityModel,
+    grokModel,
+    setGrokModel,
     permissionMode,
     setPermissionMode,
     pendingPermissionRequests,

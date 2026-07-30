@@ -62,6 +62,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   codex: 'Codex',
   opencode: 'OpenCode',
   antigravity: 'Antigravity',
+  grok: 'Grok',
 };
 
 const FALLBACK_COMMANDS: CommandEntry[] = [

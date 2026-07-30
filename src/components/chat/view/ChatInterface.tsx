@@ -76,6 +76,8 @@ function ChatInterface({
     setOpenCodeModel,
     antigravityModel,
     setAntigravityModel,
+    grokModel,
+    setGrokModel,
     permissionMode,
     pendingPermissionRequests,
     setPendingPermissionRequests,
@@ -356,6 +358,8 @@ function ChatInterface({
           setOpenCodeModel={setOpenCodeModel}
           antigravityModel={antigravityModel}
           setAntigravityModel={setAntigravityModel}
+          grokModel={grokModel}
+          setGrokModel={setGrokModel}
           providerModelCatalog={providerModelCatalog}
           providerModelsLoading={providerModelsLoading}
           tasksEnabled={tasksEnabled}

@@ -63,6 +63,15 @@ const agentConfig: Record<AgentProvider, AgentVisualConfig> = {
     subtextClass: 'text-sky-700 dark:text-sky-300',
     buttonClass: 'bg-sky-600 hover:bg-sky-700 active:bg-sky-800 dark:bg-sky-700 dark:hover:bg-sky-600',
   },
+  grok: {
+    name: 'Grok',
+    description: 'Grok CLI assistant',
+    bgClass: 'bg-stone-50 dark:bg-stone-900/20',
+    borderClass: 'border-stone-200 dark:border-stone-800',
+    textClass: 'text-stone-900 dark:text-stone-100',
+    subtextClass: 'text-stone-700 dark:text-stone-300',
+    buttonClass: 'bg-stone-900 hover:bg-stone-800 active:bg-stone-950 dark:bg-stone-700 dark:hover:bg-stone-600',
+  },
 };
 
 export default function AccountContent({ agent, authStatus, onLogin }: AccountContentProps) {

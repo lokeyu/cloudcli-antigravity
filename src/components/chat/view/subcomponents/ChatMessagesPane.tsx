@@ -43,6 +43,8 @@ interface ChatMessagesPaneProps {
   setOpenCodeModel: (model: string) => void;
   antigravityModel: string;
   setAntigravityModel: (model: string) => void;
+  grokModel: string;
+  setGrokModel: (model: string) => void;
   providerModelCatalog: Partial<Record<LLMProvider, ProviderModelsDefinition>>;
   providerModelsLoading: boolean;
   tasksEnabled: boolean;
@@ -93,6 +95,8 @@ function ChatMessagesPane({
   setOpenCodeModel,
   antigravityModel,
   setAntigravityModel,
+  grokModel,
+  setGrokModel,
   providerModelCatalog,
   providerModelsLoading,
   tasksEnabled,
@@ -201,6 +205,8 @@ function ChatMessagesPane({
           setOpenCodeModel={setOpenCodeModel}
           antigravityModel={antigravityModel}
           setAntigravityModel={setAntigravityModel}
+          grokModel={grokModel}
+          setGrokModel={setGrokModel}
           providerModelCatalog={providerModelCatalog}
           providerModelsLoading={providerModelsLoading}
           tasksEnabled={tasksEnabled}

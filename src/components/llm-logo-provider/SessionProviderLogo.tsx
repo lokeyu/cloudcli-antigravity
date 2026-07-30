@@ -3,6 +3,7 @@ import AntigravityLogo from './AntigravityLogo';
 import ClaudeLogo from './ClaudeLogo';
 import CodexLogo from './CodexLogo';
 import CursorLogo from './CursorLogo';
+import GrokLogo from './GrokLogo';
 import OpenCodeLogo from './OpenCodeLogo';
 
 type SessionProviderLogoProps = {
@@ -28,6 +29,10 @@ export default function SessionProviderLogo({
 
   if (provider === 'antigravity') {
     return <AntigravityLogo className={className} />;
+  }
+
+  if (provider === 'grok') {
+    return <GrokLogo className={className} />;
   }
 
   return <ClaudeLogo className={className} />;

@@ -61,6 +61,7 @@ const PROVIDER_NAMES: Record<SkillsProvider, string> = {
   cursor: 'Cursor',
   opencode: 'OpenCode',
   antigravity: 'Antigravity',
+  grok: 'Grok',
 };
 
 const PROVIDER_SKILL_PATHS: Record<Exclude<SkillsProvider, 'opencode'>, string> = {
@@ -68,6 +69,7 @@ const PROVIDER_SKILL_PATHS: Record<Exclude<SkillsProvider, 'opencode'>, string> 
   codex: '~/.agents/skills/<skill-name>/SKILL.md',
   cursor: '~/.cursor/skills/<skill-name>/SKILL.md',
   antigravity: '~/.gemini/config/skills/<skill-name>/SKILL.md',
+  grok: 'Discovered by Grok CLI',
 };
 
 const SCOPE_LABELS: Record<SkillsScope, string> = {
@@ -551,15 +553,17 @@ export default function ProviderSkills({ selectedProvider, currentProjects }: Pr
               </button>
             )}
           </div>
-          <Button
-            type="button"
-            size="sm"
-            className="w-full sm:w-auto"
-            onClick={() => handleAddDialogOpenChange(true)}
-          >
-            <Plus className="h-4 w-4" />
-            Add Skill
-          </Button>
+          {selectedProvider !== 'grok' && (
+            <Button
+              type="button"
+              size="sm"
+              className="w-full sm:w-auto"
+              onClick={() => handleAddDialogOpenChange(true)}
+            >
+              <Plus className="h-4 w-4" />
+              Add Skill
+            </Button>
+          )}
           <Button
             onClick={() => void refreshSkills({ force: true })}
             variant="outline"

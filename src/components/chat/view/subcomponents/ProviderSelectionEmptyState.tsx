@@ -29,6 +29,7 @@ const PROVIDER_META: { id: LLMProvider; name: string }[] = [
   { id: "cursor", name: "Cursor" },
   { id: "opencode", name: "OpenCode" },
   { id: "antigravity", name: "Antigravity" },
+  { id: "grok", name: "Grok" },
 ];
 
 const MOD_KEY =
@@ -61,6 +62,8 @@ type ProviderSelectionEmptyStateProps = {
   setOpenCodeModel: (model: string) => void;
   antigravityModel: string;
   setAntigravityModel: (model: string) => void;
+  grokModel: string;
+  setGrokModel: (model: string) => void;
   providerModelCatalog: Partial<Record<LLMProvider, ProviderModelsDefinition>>;
   providerModelsLoading: boolean;
   tasksEnabled: boolean;
@@ -90,11 +93,13 @@ function getCurrentModel(
   co: string,
   o: string,
   a: string,
+  g: string,
 ) {
   if (p === "claude") return c;
   if (p === "codex") return co;
   if (p === "opencode") return o;
   if (p === "antigravity") return a;
+  if (p === "grok") return g;
   return cu;
 }
 
@@ -104,6 +109,7 @@ function getProviderDisplayName(p: LLMProvider) {
   if (p === "codex") return "Codex";
   if (p === "opencode") return "OpenCode";
   if (p === "antigravity") return "Antigravity";
+  if (p === "grok") return "Grok";
   return "Claude";
 }
 
@@ -123,6 +129,8 @@ export default function ProviderSelectionEmptyState({
   setOpenCodeModel,
   antigravityModel,
   setAntigravityModel,
+  grokModel,
+  setGrokModel,
   providerModelCatalog,
   providerModelsLoading,
   tasksEnabled,
@@ -152,6 +160,7 @@ export default function ProviderSelectionEmptyState({
     codexModel,
     opencodeModel,
     antigravityModel,
+    grokModel,
   );
 
   const currentModelLabel = useMemo(() => {
@@ -176,12 +185,15 @@ export default function ProviderSelectionEmptyState({
       } else if (providerId === "antigravity") {
         setAntigravityModel(modelValue);
         localStorage.setItem("antigravity-model", modelValue);
+      } else if (providerId === "grok") {
+        setGrokModel(modelValue);
+        localStorage.setItem("grok-model", modelValue);
       } else {
         setCursorModel(modelValue);
         localStorage.setItem("cursor-model", modelValue);
       }
     },
-    [setClaudeModel, setCursorModel, setCodexModel, setOpenCodeModel, setAntigravityModel],
+    [setClaudeModel, setCursorModel, setCodexModel, setOpenCodeModel, setAntigravityModel, setGrokModel],
   );
 
   const handleModelSelect = useCallback(
@@ -331,6 +343,10 @@ export default function ProviderSelectionEmptyState({
                 antigravity: t("providerSelection.readyPrompt.antigravity", {
                   model: antigravityModel,
                   defaultValue: "Ready with Antigravity {{model}}",
+                }),
+                grok: t("providerSelection.readyPrompt.grok", {
+                  model: grokModel,
+                  defaultValue: "Ready with Grok {{model}}",
                 }),
               }[provider]
             }
