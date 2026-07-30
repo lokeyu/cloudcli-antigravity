@@ -129,7 +129,7 @@
   body {
     @apply bg-background text-foreground;
 
-    font-family: "Encode Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     margin: 0;
@@ -604,6 +604,8 @@
     contain-intrinsic-size: auto 96px;
   }
 
+}
+
   /* Mobile touch optimization and safe areas */
   @media (max-width: 768px) {
     * {
@@ -743,6 +745,7 @@
     }
   }
   
+@layer utilities {
   /* Safe area support for iOS devices */
   .ios-bottom-safe {
     padding-bottom: env(safe-area-inset-bottom);
