@@ -2,11 +2,9 @@ import childProcess from 'node:child_process';
 
 import { parseGrokModelsStdout } from '@/modules/providers/list/grok/grok-models.provider.js';
 import type { IProviderAuth } from '@/shared/interfaces.js';
-import type { LLMProvider, ProviderAuthStatus } from '@/shared/types.js';
+import type { ProviderAuthStatus } from '@/shared/types.js';
 
-// Grok is not part of the `LLMProvider` union yet: this stage ships the auth
-// adapter alone, and the union gains 'grok' when the provider is registered.
-const PROVIDER = 'grok' as LLMProvider;
+const PROVIDER = 'grok';
 
 /**
  * `grok models` is the only read-only account probe the CLI publishes.

@@ -313,8 +313,8 @@ test('providerMcpService global adder writes to all providers and rejects unsupp
       workspacePath,
     });
 
-    assert.equal(globalResult.length, 5);
-    assert.equal(globalResult.filter((entry) => entry.created === true).length, 4);
+    assert.equal(globalResult.length, 6);
+    assert.equal(globalResult.filter((entry) => entry.created === true).length, 5);
 
     const antigravityResult = globalResult.find((entry) => entry.provider === 'antigravity');
     assert.deepEqual(antigravityResult, {

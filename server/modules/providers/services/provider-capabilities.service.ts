@@ -103,6 +103,32 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     // (`gemini-3.1-pro-high`), so there is no separate effort selection.
     supportsEffort: false,
   },
+  grok: {
+    provider: 'grok',
+    // All six permission modes are supported directly by the Grok CLI runtime
+    // (`--permission-mode`).
+    permissionModes: [
+      'default',
+      'acceptEdits',
+      'auto',
+      'dontAsk',
+      'bypassPermissions',
+      'plan',
+    ],
+    defaultPermissionMode: 'default',
+    // Attachments are not implemented in the Grok CLI runtime.
+    supportsImages: false,
+    supportsFiles: false,
+    // Abort is supported via SIGTERM process signal.
+    supportsAbort: true,
+    // Interactive permission request events are not normalized by Grok sessions.
+    supportsPermissionRequests: false,
+    // Live usage may arrive on runtime end events, but no historical token-usage
+    // service exists for Grok yet.
+    supportsTokenUsage: false,
+    // Grok CLI has no separate reasoning effort parameter in runtime options.
+    supportsEffort: false,
+  },
 };
 
 /**

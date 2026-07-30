@@ -13,7 +13,7 @@ import { AppError } from '@/shared/utils.js';
 
 //----------------- GROK MCP PROVIDER ADAPTER ------------
 
-const PROVIDER = 'grok' as LLMProvider;
+const PROVIDER = 'grok';
 const GROK_COMMAND = 'grok';
 const GROK_CLI_TIMEOUT_MS = 20_000;
 const SUPPORTED_SCOPES: readonly McpScope[] = ['user', 'project'];

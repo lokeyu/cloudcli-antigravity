@@ -17,11 +17,7 @@ import {
   readOptionalString,
 } from '@/shared/utils.js';
 
-// Grok is not part of the `LLMProvider` union yet: this stage ships the runtime
-// adapter alone, and the union gains 'grok' when the provider is registered.
-// This is the single place that bridges the gap, so registration only has to
-// extend the union and delete the assertion.
-const PROVIDER = 'grok' as LLMProvider;
+const PROVIDER = 'grok';
 
 // `grok` is looked up on PATH and spawned directly — never through a shell — so
 // the prompt travels as a single argv entry with no quoting rules to get wrong.
