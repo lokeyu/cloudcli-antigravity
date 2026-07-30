@@ -18,9 +18,9 @@ import {
 
 const FALLBACK_DEFAULT_MODEL: Record<LLMProvider, string> = {
   claude: 'default',
-  cursor: 'gpt-5.3-codex',
+  cursor: 'composer-2.5-fast',
   codex: 'gpt-5.4',
-  opencode: 'anthropic/claude-sonnet-4-5',
+  opencode: 'opencode/big-pickle',
   antigravity: 'gemini-3.6-flash-high',
   grok: 'grok-4.5',
 };
@@ -306,19 +306,54 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     return Boolean(FALLBACK_PROVIDER_EFFORT_VALUES[targetProvider]?.length);
   }, [providerCapabilities]);
 
-  const pickStoredOrCurrent = (
-    storageKey: string,
+  /**
+   * Pure model-selection resolver. A non-empty live catalog is the source of
+   * truth: only IDs the backend actually advertises may be selected.
+   *
+   *   1. `current` (React state) — the live user choice, if still offered.
+   *   2. `stored` (localStorage) — the persistence copy, if still offered.
+   *   3. `backendDefault` (catalog DEFAULT) — only if the catalog lists it.
+   *   4. First available option in the catalog.
+   *   5. `fallback` — emergency frontend-only value.
+   *
+   * `current` wins over `stored` because it reflects the live selection while
+   * localStorage is only its persisted mirror.
+   *
+   * An empty (or not yet loaded) catalog carries no information, so it must
+   * never reset a working selection: `current` → `stored` → `fallback`.
+   *
+   * A stale localStorage entry is therefore replaced by the backend's actual
+   * default rather than by any static migration table.
+   */
+  const resolveModelSelection = (
+    stored: string | null,
     current: string,
-    def: ProviderModelsDefinition,
+    catalogOptions: ProviderModelOption[],
+    backendDefault: string,
+    fallback: string,
   ): string => {
-    const stored = localStorage.getItem(storageKey);
-    if (stored && def.OPTIONS.some((o) => o.value === stored)) {
-      return stored;
+    const inCatalog = (id: string): boolean =>
+      catalogOptions.some((o) => o.value === id);
+
+    // Empty / temporarily missing catalog → keep whatever already works.
+    if (catalogOptions.length === 0) {
+      return current || stored || fallback;
     }
-    if (current && def.OPTIONS.some((o) => o.value === current)) {
+
+    // 1. Live user choice, still advertised by the backend.
+    if (current && inCatalog(current)) {
       return current;
     }
-    return def.DEFAULT;
+    // 2. Persisted choice, still advertised by the backend.
+    if (stored && inCatalog(stored)) {
+      return stored;
+    }
+    // 3. Backend default — never used when absent from the options.
+    if (backendDefault && inCatalog(backendDefault)) {
+      return backendDefault;
+    }
+    // 4. First option from the live catalog.
+    return catalogOptions[0].value;
   };
 
   const getModelOption = useCallback((
@@ -389,7 +424,13 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
   useEffect(() => {
     const claude = providerModelCatalog.claude;
     if (claude) {
-      const next = pickStoredOrCurrent('claude-model', claudeModel, claude);
+      const next = resolveModelSelection(
+        localStorage.getItem('claude-model'),
+        claudeModel,
+        claude.OPTIONS,
+        claude.DEFAULT,
+        FALLBACK_DEFAULT_MODEL.claude,
+      );
       if (next !== claudeModel) {
         setClaudeModel(next);
       }
@@ -402,7 +443,13 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
   useEffect(() => {
     const cursor = providerModelCatalog.cursor;
     if (cursor) {
-      const next = pickStoredOrCurrent('cursor-model', cursorModel, cursor);
+      const next = resolveModelSelection(
+        localStorage.getItem('cursor-model'),
+        cursorModel,
+        cursor.OPTIONS,
+        cursor.DEFAULT,
+        FALLBACK_DEFAULT_MODEL.cursor,
+      );
       if (next !== cursorModel) {
         setCursorModel(next);
       }
@@ -415,7 +462,13 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
   useEffect(() => {
     const codex = providerModelCatalog.codex;
     if (codex) {
-      const next = pickStoredOrCurrent('codex-model', codexModel, codex);
+      const next = resolveModelSelection(
+        localStorage.getItem('codex-model'),
+        codexModel,
+        codex.OPTIONS,
+        codex.DEFAULT,
+        FALLBACK_DEFAULT_MODEL.codex,
+      );
       if (next !== codexModel) {
         setCodexModel(next);
       }
@@ -428,7 +481,13 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
   useEffect(() => {
     const opencode = providerModelCatalog.opencode;
     if (opencode) {
-      const next = pickStoredOrCurrent('opencode-model', opencodeModel, opencode);
+      const next = resolveModelSelection(
+        localStorage.getItem('opencode-model'),
+        opencodeModel,
+        opencode.OPTIONS,
+        opencode.DEFAULT,
+        FALLBACK_DEFAULT_MODEL.opencode,
+      );
       if (next !== opencodeModel) {
         setOpenCodeModel(next);
       }
@@ -441,7 +500,13 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
   useEffect(() => {
     const antigravity = providerModelCatalog.antigravity;
     if (antigravity) {
-      const next = pickStoredOrCurrent('antigravity-model', antigravityModel, antigravity);
+      const next = resolveModelSelection(
+        localStorage.getItem('antigravity-model'),
+        antigravityModel,
+        antigravity.OPTIONS,
+        antigravity.DEFAULT,
+        FALLBACK_DEFAULT_MODEL.antigravity,
+      );
       if (next !== antigravityModel) {
         setAntigravityModel(next);
       }
@@ -454,7 +519,13 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
   useEffect(() => {
     const grok = providerModelCatalog.grok;
     if (grok) {
-      const next = pickStoredOrCurrent('grok-model', grokModel, grok);
+      const next = resolveModelSelection(
+        localStorage.getItem('grok-model'),
+        grokModel,
+        grok.OPTIONS,
+        grok.DEFAULT,
+        FALLBACK_DEFAULT_MODEL.grok,
+      );
       if (next !== grokModel) {
         setGrokModel(next);
       }
