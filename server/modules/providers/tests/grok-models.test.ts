@@ -10,6 +10,7 @@ import {
   buildGrokDefinition,
   parseGrokModelsStdout,
 } from '@/modules/providers/list/grok/grok-models.provider.js';
+import { ProviderModelsDiscoveryError } from '@/shared/provider-models-discovery.js';
 
 // Exactly what `grok models` printed on CLI 0.2.114 with one entitled model.
 const REAL_CLI_STDOUT = [
@@ -51,24 +52,31 @@ type CliBehaviour = {
   stderr?: string;
   exitCode?: number | null;
   spawnError?: Error;
+  /** Never exits, so the provider's own timeout is the only thing that settles it. */
+  stall?: boolean;
 };
 
 /**
- * Runs `getSupportedModels()` against a scripted fake CLI.
+ * Runs `body` with `child_process.spawn` replaced by a scripted fake CLI.
  *
- * The single assertion below is the seam between the fake child and Node's
- * heavily overloaded `spawn` signature.
+ * No real binary is located or run, so nothing here reaches the account's quota.
+ * The single cast below is the seam between the fake child and Node's heavily
+ * overloaded `spawn` signature; the original is always restored.
  */
-async function readModelsWithFakeCli(behaviour: CliBehaviour): Promise<{
-  definition: Awaited<ReturnType<GrokProviderModels['getSupportedModels']>>;
-  call: SpawnCall;
-}> {
+async function withFakeGrokCli<T>(
+  behaviour: CliBehaviour,
+  body: (calls: SpawnCall[]) => Promise<T>,
+): Promise<T> {
   const calls: SpawnCall[] = [];
   const originalSpawn = childProcess.spawn;
 
   childProcess.spawn = ((command: string, args: readonly string[], options: SpawnOptions) => {
     const child = new FakeGrokModelsProcess();
     calls.push({ command, args, options, child });
+
+    if (behaviour.stall) {
+      return child as unknown as ChildProcess;
+    }
 
     // The provider attaches its listeners synchronously after spawn returns.
     setImmediate(() => {
@@ -90,14 +98,40 @@ async function readModelsWithFakeCli(behaviour: CliBehaviour): Promise<{
   }) as typeof childProcess.spawn;
 
   try {
-    const definition = await new GrokProviderModels().getSupportedModels();
-    const call = calls[0];
-    assert.ok(call, 'expected the provider to spawn the CLI');
-    return { definition, call };
+    return await body(calls);
   } finally {
     childProcess.spawn = originalSpawn;
   }
 }
+
+/** Runs `getSupportedModels()` against a scripted fake CLI that answers. */
+async function readModelsWithFakeCli(behaviour: CliBehaviour): Promise<{
+  definition: Awaited<ReturnType<GrokProviderModels['getSupportedModels']>>;
+  call: SpawnCall;
+}> {
+  return withFakeGrokCli(behaviour, async (calls) => {
+    const definition = await new GrokProviderModels().getSupportedModels();
+    const call = calls[0];
+    assert.ok(call, 'expected the provider to spawn the CLI');
+    return { definition, call };
+  });
+}
+
+/**
+ * Asserts one rejection is a discovery failure carrying the Grok catalog.
+ *
+ * The catalog has to ride along on the error: it is the only thing
+ * `providerModelsService` can answer with when no snapshot exists.
+ */
+const assertGrokDiscoveryFailure = (error: unknown): true => {
+  assert.ok(
+    error instanceof ProviderModelsDiscoveryError,
+    `expected a ProviderModelsDiscoveryError, got ${String(error)}`,
+  );
+  assert.equal(error.name, 'ProviderModelsDiscoveryError');
+  assert.deepEqual(error.fallback, GROK_FALLBACK_MODELS);
+  return true;
+};
 
 // ---------------------------
 // Parsing real CLI output
@@ -234,29 +268,146 @@ test('Grok models provider falls back to the first model when nothing is marked'
 // ---------------------------
 // Failure paths
 
-test('Grok models provider falls back to grok-4.5 when the CLI prints nothing usable', async () => {
-  for (const stdout of ['', '   \n\n', 'You are logged in with grok.com.\n']) {
-    const { definition } = await readModelsWithFakeCli({ stdout });
-    assert.deepEqual(definition, GROK_FALLBACK_MODELS);
-    assert.equal(definition.DEFAULT, 'grok-4.5');
+test('Grok models provider reports output without models as a failed discovery', async () => {
+  const unusableOutputs = [
+    '',
+    '   \n\n',
+    'You are logged in with grok.com.\n',
+    // Fully malformed: no line has model-id shape anywhere in it.
+    ' binary garbage\n{"unexpected": "json"}\n<<<>>>\n',
+    // A catalog whose rows carry no usable ids at all.
+    'Available models:\n  * none\n  * (see docs)\n',
+  ];
+
+  for (const stdout of unusableOutputs) {
+    await withFakeGrokCli({ stdout }, async () => {
+      await assert.rejects(
+        () => new GrokProviderModels().getSupportedModels(),
+        (error: unknown) => {
+          assertGrokDiscoveryFailure(error);
+          assert.match((error as Error).message, /listed no usable models/);
+          // Nothing threw underneath, so no cause is invented for it.
+          assert.equal((error as ProviderModelsDiscoveryError).cause, undefined);
+          return true;
+        },
+        `expected discovery to fail for stdout ${JSON.stringify(stdout)}`,
+      );
+    });
   }
 });
 
-test('Grok models provider falls back to grok-4.5 on a non-zero exit', async () => {
-  const { definition } = await readModelsWithFakeCli({
-    stderr: 'grok: not logged in\n',
-    exitCode: 1,
+test('Grok models provider reports a non-zero exit as a failed discovery with a cause', async () => {
+  await withFakeGrokCli({ stderr: 'grok: not logged in\n', exitCode: 1 }, async () => {
+    await assert.rejects(
+      () => new GrokProviderModels().getSupportedModels(),
+      (error: unknown) => {
+        assertGrokDiscoveryFailure(error);
+        const { cause } = error as ProviderModelsDiscoveryError;
+        assert.ok(cause instanceof Error);
+        // The CLI's own stderr stays on the cause so logs name the real reason.
+        assert.equal(cause.message, 'grok: not logged in');
+        return true;
+      },
+    );
   });
-
-  assert.deepEqual(definition, GROK_FALLBACK_MODELS);
 });
 
-test('Grok models provider falls back to grok-4.5 when the CLI is not installed', async () => {
-  const { definition } = await readModelsWithFakeCli({
-    spawnError: new Error('spawn grok ENOENT'),
-  });
+test('Grok models provider reports a missing CLI as a failed discovery with a cause', async () => {
+  const spawnError = Object.assign(new Error('spawn grok ENOENT'), { code: 'ENOENT' });
 
-  assert.deepEqual(definition, GROK_FALLBACK_MODELS);
+  await withFakeGrokCli({ spawnError }, async () => {
+    await assert.rejects(
+      () => new GrokProviderModels().getSupportedModels(),
+      (error: unknown) => {
+        assertGrokDiscoveryFailure(error);
+        assert.equal((error as ProviderModelsDiscoveryError).cause, spawnError);
+        return true;
+      },
+    );
+  });
+});
+
+test('Grok models provider reports its own timeout as a failed discovery', async (t) => {
+  // Only `setTimeout` is faked: the fake CLI still schedules through setImmediate.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  await withFakeGrokCli({ stall: true }, async (calls) => {
+    // The command is spawned synchronously, so the timer exists before the tick.
+    const pending = new GrokProviderModels().getSupportedModels();
+    t.mock.timers.tick(20_000);
+
+    await assert.rejects(pending, (error: unknown) => {
+      assertGrokDiscoveryFailure(error);
+      const { cause } = error as ProviderModelsDiscoveryError;
+      assert.ok(cause instanceof Error);
+      assert.equal(cause.message, 'grok models timed out');
+      return true;
+    });
+
+    // The hung child is signalled rather than left running.
+    assert.deepEqual(calls[0].child.signals, ['SIGTERM']);
+  });
+});
+
+test('a failed Grok discovery never leaks credentials into its message', async () => {
+  const behaviours: CliBehaviour[] = [
+    {
+      stderr: 'grok: invalid api key xai-SECRETKEY0123456789 in /home/user/.grok/credentials.json\n',
+      exitCode: 1,
+    },
+    { spawnError: new Error('spawn grok ENOENT') },
+    { stdout: 'You are logged in with grok.com.\n' },
+  ];
+
+  for (const behaviour of behaviours) {
+    await withFakeGrokCli(behaviour, async () => {
+      await assert.rejects(
+        () => new GrokProviderModels().getSupportedModels(),
+        (error: unknown) => {
+          const { message } = error as Error;
+          // The message is a fixed string; only the cause quotes the CLI.
+          assert.ok(!message.includes('xai-SECRETKEY0123456789'), message);
+          assert.ok(!message.includes('.grok'), message);
+          assert.ok(!message.includes('api key'), message);
+          return true;
+        },
+      );
+    });
+  }
+});
+
+test('a failed Grok discovery carries the shipped catalog for the caching layer', async () => {
+  await withFakeGrokCli({ stdout: '' }, async () => {
+    await assert.rejects(
+      () => new GrokProviderModels().getSupportedModels(),
+      (error: unknown) => {
+        assert.ok(error instanceof ProviderModelsDiscoveryError);
+        assert.deepEqual(error.fallback, GROK_FALLBACK_MODELS);
+        assert.equal(error.fallback.DEFAULT, 'grok-4.5');
+        return true;
+      },
+    );
+  });
+});
+
+test('Grok models provider keeps naming a default model when discovery fails', async () => {
+  for (const behaviour of [
+    { stdout: '' } satisfies CliBehaviour,
+    { spawnError: new Error('spawn grok ENOENT') } satisfies CliBehaviour,
+    { stderr: 'grok: not logged in\n', exitCode: 1 } satisfies CliBehaviour,
+  ]) {
+    await withFakeGrokCli(behaviour, async () => {
+      const provider = new GrokProviderModels();
+
+      // A failed discovery must not turn into a failed active-model lookup.
+      assert.deepEqual(await provider.getCurrentActiveModel(), {
+        model: GROK_FALLBACK_MODELS.DEFAULT,
+      });
+      assert.deepEqual(await provider.getCurrentActiveModel('app-session-1'), {
+        model: 'grok-4.5',
+      });
+    });
+  }
 });
 
 test('the fallback catalog lists only the model the CLI was seen offering', () => {
@@ -296,6 +447,55 @@ test('Grok models provider reads the live catalog through the CLI', async () => 
       { value: 'grok-code-fast-1', label: 'Grok Code Fast 1' },
     ],
     DEFAULT: 'grok-code-fast-1',
+  });
+});
+
+test('Grok models provider keeps the models from a partly unreadable listing', async () => {
+  const { definition } = await readModelsWithFakeCli({
+    stdout: [
+      'You are logged in with grok.com.',
+      'Update available: 0.2.115 — run grok upgrade',
+      '',
+      'Available models:',
+      '  * grok-4.5 (default)',
+      '  see https://docs.x.ai for details',
+      '  * grok-code-fast-1',
+      '  <<< unreadable row >>>',
+      '',
+    ].join('\n'),
+  });
+
+  // Banners, headers and noise are dropped; every readable row survives.
+  assert.deepEqual(definition, {
+    OPTIONS: [
+      { value: 'grok-4.5', label: 'Grok 4.5' },
+      { value: 'grok-code-fast-1', label: 'Grok Code Fast 1' },
+    ],
+    DEFAULT: 'grok-4.5',
+  });
+});
+
+test('an exhausted Grok quota alongside a listed catalog is still a successful discovery', async () => {
+  // Quota exhaustion is a generation-time failure: `grok models` still exits 0
+  // and still lists what the account may select.
+  const { definition } = await readModelsWithFakeCli({
+    stdout: [
+      'You are logged in with grok.com.',
+      'Your weekly quota is exhausted. Usage resets on Monday.',
+      '',
+      'Default model: grok-4.5',
+      '',
+      'Available models:',
+      '  * grok-4.5 (default)',
+      '',
+    ].join('\n'),
+    stderr: 'warning: weekly limit reached\n',
+    exitCode: 0,
+  });
+
+  assert.deepEqual(definition, {
+    OPTIONS: [{ value: 'grok-4.5', label: 'Grok 4.5' }],
+    DEFAULT: 'grok-4.5',
   });
 });
 

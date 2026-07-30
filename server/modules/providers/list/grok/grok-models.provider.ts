@@ -1,6 +1,7 @@
 import childProcess from 'node:child_process';
 
 import type { IProviderModels } from '@/shared/interfaces.js';
+import { catalogOrFallback, ProviderModelsDiscoveryError } from '@/shared/provider-models-discovery.js';
 import type {
   ProviderCurrentActiveModel,
   ProviderModelOption,
@@ -139,7 +140,9 @@ export const parseGrokModelsStdout = (stdout: string): GrokModelsListing => {
  * A default the CLI named wins, as long as it is a model the CLI also listed;
  * otherwise the shipped default is preferred and the first listed model is the
  * last resort. An empty reading falls back to the shipped catalog rather than
- * leaving the picker empty.
+ * leaving the picker empty; `GrokProviderModels.getSupportedModels()` rejects
+ * before reaching that branch, so the substitution is never mistaken for a live
+ * reading.
  *
  * Consumer: `server/modules/providers/tests/grok-models.test.ts`.
  */
@@ -226,6 +229,16 @@ const runGrokModelsCommand = (): Promise<string> => new Promise((resolve, reject
   });
 });
 
+/** One discovery failure, always carrying the shipped catalog. */
+const grokDiscoveryFailure = (
+  message: string,
+  cause?: unknown,
+): ProviderModelsDiscoveryError => new ProviderModelsDiscoveryError(
+  GROK_FALLBACK_MODELS,
+  message,
+  { cause },
+);
+
 /**
  * Grok's model catalog adapter.
  *
@@ -237,13 +250,47 @@ const runGrokModelsCommand = (): Promise<string> => new Promise((resolve, reject
  * `server/modules/providers/tests/grok-models.test.ts`.
  */
 export class GrokProviderModels implements IProviderModels {
+  /**
+   * Reads the live catalog from `grok models`.
+   *
+   * Rejects with `ProviderModelsDiscoveryError` when the CLI cannot be run, exits
+   * non-zero, or times out, and equally when it exits cleanly with nothing that
+   * parses as a model row. The shipped catalog rides along on the error instead
+   * of being returned here, so `providerModelsService` can prefer an existing
+   * snapshot over it rather than recording a placeholder as a live reading.
+   *
+   * A run that listed models is a successful discovery whatever else it printed:
+   * quota warnings belong to generation, not to the catalog.
+   */
   async getSupportedModels(): Promise<ProviderModelsDefinition> {
+    let stdout: string;
+
     try {
-      return buildGrokDefinition(parseGrokModelsStdout(await runGrokModelsCommand()));
-    } catch {
+      stdout = await runGrokModelsCommand();
+    } catch (error) {
       // A missing CLI, a failed run, and a timeout are all "no catalog to read".
-      return GROK_FALLBACK_MODELS;
+      throw grokDiscoveryFailure('Unable to discover Grok models', error);
     }
+
+    const listing = parseGrokModelsStdout(stdout);
+    // Checked before the builder runs: its empty-listing branch answers with the
+    // shipped catalog, which must never leave this method as a live reading.
+    if (listing.options.length === 0) {
+      throw grokDiscoveryFailure('grok models listed no usable models');
+    }
+
+    return buildGrokDefinition(listing);
+  }
+
+  /**
+   * Reads the catalog for default-naming purposes only.
+   *
+   * `getCurrentActiveModel` needs a model name to fall back on, not proof that
+   * the CLI answered, so a failed discovery resolves to the shipped catalog here
+   * rather than propagating.
+   */
+  private async readCatalogForDefault(): Promise<ProviderModelsDefinition> {
+    return catalogOrFallback(() => this.getSupportedModels());
   }
 
   /**
@@ -252,6 +299,6 @@ export class GrokProviderModels implements IProviderModels {
    * the session row, so this only ever needs to answer with the catalog default.
    */
   async getCurrentActiveModel(_sessionId?: string): Promise<ProviderCurrentActiveModel> {
-    return buildDefaultProviderCurrentActiveModel(await this.getSupportedModels());
+    return buildDefaultProviderCurrentActiveModel(await this.readCatalogForDefault());
   }
 }
