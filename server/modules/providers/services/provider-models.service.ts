@@ -1,6 +1,7 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 import { sessionsDb } from '@/modules/database/index.js';
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
@@ -29,6 +30,7 @@ type ProviderModelsServiceDependencies = {
   cachePath?: string;
   sessions?: ProviderModelsSessionStore;
   now?: () => number;
+  renameCacheFile?: typeof rename;
 };
 
 type ProviderModelsOptions = {
@@ -118,18 +120,37 @@ const readProviderModelsCacheFile = async (
 const writeProviderModelsCacheFile = async (
   cachePath: string,
   entries: Map<LLMProvider, ProviderModelsCacheEntry>,
-  now: number,
+  renameCacheFile: typeof rename,
 ): Promise<void> => {
-  const serializableEntries = Object.fromEntries(
-    [...entries.entries()].filter(([, entry]) => entry.expiresAt > now),
-  );
   const payload: ProviderModelsCacheFile = {
     version: PROVIDER_MODELS_CACHE_VERSION,
-    entries: serializableEntries,
+    // Expiry controls whether discovery runs, not whether the last working
+    // snapshot remains available as a stale fallback.
+    entries: Object.fromEntries(entries),
   };
 
-  await mkdir(path.dirname(cachePath), { recursive: true });
-  await writeFile(cachePath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+  const cacheDirectory = path.dirname(cachePath);
+  const temporaryPath = path.join(
+    cacheDirectory,
+    `.${path.basename(cachePath)}.${process.pid}.${randomUUID()}.tmp`,
+  );
+
+  await mkdir(cacheDirectory, { recursive: true });
+
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(payload, null, 2)}\n`, {
+      encoding: 'utf8',
+      flag: 'wx',
+    });
+    await renameCacheFile(temporaryPath, cachePath);
+  } catch (error) {
+    try {
+      await unlink(temporaryPath);
+    } catch {
+      // The temp file may not have been created or may already have been moved.
+    }
+    throw error;
+  }
 };
 
 /**
@@ -144,10 +165,12 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
   const cachePath = dependencies.cachePath ?? getProviderModelsCachePath();
   const sessions = dependencies.sessions ?? sessionsDb;
   const now = dependencies.now ?? (() => Date.now());
+  const renameCacheFile = dependencies.renameCacheFile ?? rename;
   const memoryCache = new Map<LLMProvider, ProviderModelsCacheEntry>();
   const pendingRequests = new Map<LLMProvider, Promise<ProviderModelsResult>>();
   let persistedCacheLoaded = false;
   let persistedCacheLoadPromise: Promise<void> | null = null;
+  let persistQueue: Promise<void> = Promise.resolve();
 
   const getAnyExistingCacheEntry = (
     provider: LLMProvider,
@@ -207,12 +230,19 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
     await persistedCacheLoadPromise;
   };
 
-  const persistCache = async (): Promise<void> => {
-    try {
-      await writeProviderModelsCacheFile(cachePath, memoryCache, now());
-    } catch (error) {
-      console.warn('Unable to persist provider models cache:', error);
-    }
+  const persistCache = (): Promise<void> => {
+    // Build the payload only when this operation reaches the front of the
+    // queue. Later writes therefore include every provider committed to memory
+    // while earlier writes were in flight.
+    persistQueue = persistQueue.then(async () => {
+      try {
+        await writeProviderModelsCacheFile(cachePath, memoryCache, renameCacheFile);
+      } catch (error) {
+        console.warn('Unable to persist provider models cache:', error);
+      }
+    });
+
+    return persistQueue;
   };
 
   const setCacheEntry = async (

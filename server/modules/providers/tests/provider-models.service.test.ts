@@ -1,5 +1,12 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import {
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -40,6 +47,23 @@ const createEphemeralCachePath = (): string => path.join(
   os.tmpdir(),
   `provider-model-cache-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.json`,
 );
+
+const createCacheEntry = (
+  model: string,
+  updatedAt: number,
+  expiresAt: number,
+) => ({
+  updatedAt,
+  expiresAt,
+  models: createModels(model),
+});
+
+const writeCacheFile = async (
+  cachePath: string,
+  entries: Record<string, ReturnType<typeof createCacheEntry>>,
+): Promise<void> => {
+  await writeFile(cachePath, `${JSON.stringify({ version: 2, entries }, null, 2)}\n`, 'utf8');
+};
 
 test('provider models service delegates to the resolved provider model adapter', async () => {
   const calls: LLMProvider[] = [];
@@ -482,6 +506,161 @@ test('provider models service preserves stale cache when provider fetch fails or
     // Fetch should fail, but return stale cache instead of throwing or wiping
     const fallbackStale = await service.getProviderModels('cursor', { bypassCache: true });
     assert.equal(fallbackStale.models.DEFAULT, 'cursor-cached');
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('persisting refreshed Cursor models keeps an expired Codex snapshot on disk', async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'provider-model-cache-keep-stale-'));
+  const cachePath = path.join(tempRoot, 'models-cache.json');
+  let currentTime = 1_000;
+  let cursorLoads = 0;
+
+  try {
+    const service = createProviderModelsService({
+      cachePath,
+      now: () => currentTime,
+      resolveProvider: (provider) => ({
+        models: {
+          getSupportedModels: async () => {
+            if (provider === 'cursor') {
+              cursorLoads += 1;
+              return createModels(`cursor-${cursorLoads}`);
+            }
+            return createModels('codex-stale');
+          },
+          getCurrentActiveModel: async () => createCurrentActiveModel(`${provider}-active`),
+        },
+      }),
+    });
+
+    await service.getProviderModels('cursor');
+    await service.getProviderModels('codex');
+    currentTime += PROVIDER_MODELS_CACHE_TTL_MS + 1;
+
+    await service.getProviderModels('cursor', { bypassCache: true });
+
+    const persisted = JSON.parse(await readFile(cachePath, 'utf8')) as {
+      entries: Record<string, { models: ProviderModelsDefinition }>;
+    };
+    assert.equal(persisted.entries.cursor.models.DEFAULT, 'cursor-2');
+    assert.equal(persisted.entries.codex.models.DEFAULT, 'codex-stale');
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('expired disk snapshots trigger discovery and remain available as stale fallback', async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'provider-model-cache-expired-fallback-'));
+  const cachePath = path.join(tempRoot, 'models-cache.json');
+  const currentTime = PROVIDER_MODELS_CACHE_TTL_MS + 10_000;
+  let loadCount = 0;
+
+  try {
+    await writeCacheFile(cachePath, {
+      codex: createCacheEntry('codex-stale', 1_000, 1_000 + PROVIDER_MODELS_CACHE_TTL_MS),
+    });
+
+    const service = createProviderModelsService({
+      cachePath,
+      now: () => currentTime,
+      resolveProvider: () => ({
+        models: {
+          getSupportedModels: async () => {
+            loadCount += 1;
+            throw new Error('Codex discovery failed');
+          },
+          getCurrentActiveModel: async () => createCurrentActiveModel('codex-active'),
+        },
+      }),
+    });
+
+    const result = await service.getProviderModels('codex');
+
+    assert.equal(loadCount, 1, 'an expired entry must not be treated as fresh');
+    assert.equal(result.models.DEFAULT, 'codex-stale');
+    assert.equal(result.cache.source, 'disk');
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('parallel provider refreshes serialize atomic writes and persist valid results for both providers', async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'provider-model-cache-parallel-'));
+  const cachePath = path.join(tempRoot, 'models-cache.json');
+  let activeRenames = 0;
+  let maximumActiveRenames = 0;
+
+  try {
+    const service = createProviderModelsService({
+      cachePath,
+      renameCacheFile: async (...args: Parameters<typeof rename>) => {
+        activeRenames += 1;
+        maximumActiveRenames = Math.max(maximumActiveRenames, activeRenames);
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          await rename(...args);
+        } finally {
+          activeRenames -= 1;
+        }
+      },
+      resolveProvider: (provider) => ({
+        models: {
+          getSupportedModels: async () => createModels(`${provider}-fresh`),
+          getCurrentActiveModel: async () => createCurrentActiveModel(`${provider}-active`),
+        },
+      }),
+    });
+
+    await Promise.all([
+      service.getProviderModels('cursor', { bypassCache: true }),
+      service.getProviderModels('codex', { bypassCache: true }),
+    ]);
+
+    const raw = await readFile(cachePath, 'utf8');
+    const persisted = JSON.parse(raw) as {
+      version: number;
+      entries: Record<string, { models: ProviderModelsDefinition }>;
+    };
+
+    assert.equal(maximumActiveRenames, 1);
+    assert.equal(persisted.version, 2);
+    assert.equal(persisted.entries.cursor.models.DEFAULT, 'cursor-fresh');
+    assert.equal(persisted.entries.codex.models.DEFAULT, 'codex-fresh');
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('failed atomic rename preserves the previous cache file and cleans up the temp file', async (t) => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'provider-model-cache-atomic-failure-'));
+  const cachePath = path.join(tempRoot, 'models-cache.json');
+
+  try {
+    await writeCacheFile(cachePath, {
+      codex: createCacheEntry('codex-working', 1_000, 1_000 + PROVIDER_MODELS_CACHE_TTL_MS),
+    });
+    const original = await readFile(cachePath, 'utf8');
+    t.mock.method(console, 'warn', () => {});
+
+    const service = createProviderModelsService({
+      cachePath,
+      renameCacheFile: async () => {
+        throw new Error('simulated rename failure');
+      },
+      resolveProvider: (provider) => ({
+        models: {
+          getSupportedModels: async () => createModels(`${provider}-fresh`),
+          getCurrentActiveModel: async () => createCurrentActiveModel(`${provider}-active`),
+        },
+      }),
+    });
+
+    await service.getProviderModels('cursor', { bypassCache: true });
+
+    assert.equal(await readFile(cachePath, 'utf8'), original);
+    assert.deepEqual(await readdir(tempRoot), ['models-cache.json']);
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
