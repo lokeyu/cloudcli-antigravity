@@ -81,6 +81,28 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsTokenUsage: true,
     supportsEffort: true,
   },
+  antigravity: {
+    provider: 'antigravity',
+    // Mapped by the runtime onto the `agy` execution-mode flag:
+    // `--mode=plan` (plan), `--mode=accept-edits` (acceptEdits) and
+    // `--dangerously-skip-permissions` (bypassPermissions). `default` leaves the
+    // CLI's own review mode in charge. See resolveAntigravityPermissionArgs in
+    // the Antigravity runtime adapter.
+    permissionModes: ['default', 'acceptEdits', 'bypassPermissions', 'plan'],
+    defaultPermissionMode: 'default',
+    // `agy` print mode accepts a prompt only — it has no attachment flag, so
+    // image and file uploads are not offered rather than silently dropped.
+    supportsImages: false,
+    supportsFiles: false,
+    supportsAbort: true,
+    supportsPermissionRequests: false,
+    // Usage totals arrive live on the CLI's own `result` event, but Antigravity
+    // persists nothing the token-usage endpoint could read back afterwards.
+    supportsTokenUsage: false,
+    // Reasoning effort is part of the Antigravity model id itself
+    // (`gemini-3.1-pro-high`), so there is no separate effort selection.
+    supportsEffort: false,
+  },
 };
 
 /**

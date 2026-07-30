@@ -278,6 +278,21 @@ export function createProviderTokenUsageService(
         };
       }
 
+      if (session.provider === 'antigravity') {
+        // `agy` reports usage only on the `result` event of a live run (the chat
+        // stream forwards it as a `token_budget` status) and persists it inside
+        // undocumented trajectory blobs, so there is nothing to read back here.
+        return {
+          used: 0,
+          total: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          breakdown: { input: 0, output: 0 },
+          unsupported: true,
+          message: 'Token usage tracking not available for Antigravity sessions',
+        };
+      }
+
       if (session.provider === 'opencode') {
         const databasePath = dependencies.getOpenCodeDatabasePath();
         if (!dependencies.fileExists(databasePath)) {

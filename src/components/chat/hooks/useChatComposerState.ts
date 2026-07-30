@@ -635,6 +635,8 @@ export function useChatComposerState({
               ? 'codex-settings'
               : provider === 'opencode'
                   ? 'opencode-settings'
+                  : provider === 'antigravity'
+                    ? 'antigravity-settings'
                 : 'claude-settings';
         const savedSettings = safeLocalStorage.getItem(settingsKey);
         if (savedSettings) {
