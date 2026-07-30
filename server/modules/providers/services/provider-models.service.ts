@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { sessionsDb } from '@/modules/database/index.js';
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import type { IProvider } from '@/shared/interfaces.js';
+import { isProviderModelsDiscoveryError } from '@/shared/provider-models-discovery.js';
 import type {
   LLMProvider,
   ProviderCurrentActiveModel,
@@ -16,6 +17,15 @@ import type {
 } from '@/shared/types.js';
 
 export const PROVIDER_MODELS_CACHE_TTL_MS = 3 * 24 * 60 * 60 * 1000;
+/**
+ * How long a provider's built-in catalog answers for after discovery failed and
+ * no snapshot existed to fall back on.
+ *
+ * Deliberately far shorter than the snapshot TTL: a built-in catalog is a
+ * placeholder, so the next request a minute later must be free to probe the CLI
+ * again, while a burst of requests in between does not spawn one process each.
+ */
+export const PROVIDER_MODELS_FALLBACK_TTL_MS = 60_000;
 const PROVIDER_MODELS_CACHE_VERSION = 2;
 const UNCACHED_PROVIDERS = new Set<LLMProvider>(['claude']);
 
@@ -46,6 +56,18 @@ type ProviderModelsCacheEntry = {
 type ProviderModelsCacheFile = {
   version: number;
   entries: Record<string, ProviderModelsCacheEntry>;
+};
+
+/**
+ * One provider's built-in catalog, held in memory only.
+ *
+ * Kept apart from the working snapshot cache on purpose: `persistCache()`
+ * serializes the whole snapshot map, so a fallback parked there would reach disk
+ * as soon as any other provider refreshed.
+ */
+type ProviderModelsFallbackEntry = {
+  models: ProviderModelsDefinition;
+  expiresAt: number;
 };
 
 const getProviderModelsCachePath = (): string => path.join(
@@ -167,6 +189,8 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
   const now = dependencies.now ?? (() => Date.now());
   const renameCacheFile = dependencies.renameCacheFile ?? rename;
   const memoryCache = new Map<LLMProvider, ProviderModelsCacheEntry>();
+  // Never persisted and never merged into `memoryCache`; see the type comment.
+  const fallbackCache = new Map<LLMProvider, ProviderModelsFallbackEntry>();
   const pendingRequests = new Map<LLMProvider, Promise<ProviderModelsResult>>();
   let persistedCacheLoaded = false;
   let persistedCacheLoadPromise: Promise<void> | null = null;
@@ -184,6 +208,57 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
       };
     }
     return null;
+  };
+
+  /**
+   * Describes a built-in catalog in the shape callers already expect.
+   *
+   * `source` stays `'fresh'` because the wire format is unchanged at this stage:
+   * the short expiry is what tells the reader this is not a three-day snapshot.
+   */
+  const toFallbackResult = (
+    models: ProviderModelsDefinition,
+    expiresAt: number,
+  ): ProviderModelsResult => ({
+    models,
+    cache: {
+      updatedAt: new Date(expiresAt - PROVIDER_MODELS_FALLBACK_TTL_MS).toISOString(),
+      expiresAt: new Date(expiresAt).toISOString(),
+      source: 'fresh',
+    },
+  });
+
+  const readFallbackCacheEntry = (
+    provider: LLMProvider,
+    currentTime: number,
+  ): ProviderModelsResult | null => {
+    const entry = fallbackCache.get(provider);
+    if (!entry) {
+      return null;
+    }
+
+    if (entry.expiresAt <= currentTime) {
+      fallbackCache.delete(provider);
+      return null;
+    }
+
+    return toFallbackResult(entry.models, entry.expiresAt);
+  };
+
+  /**
+   * Parks a built-in catalog for the fallback TTL.
+   *
+   * Called only when discovery failed *and* no snapshot of any age exists, so
+   * this never competes with a real reading of the provider's catalog.
+   */
+  const setFallbackCacheEntry = (
+    provider: LLMProvider,
+    models: ProviderModelsDefinition,
+    currentTime: number,
+  ): ProviderModelsResult => {
+    const expiresAt = currentTime + PROVIDER_MODELS_FALLBACK_TTL_MS;
+    fallbackCache.set(provider, { models, expiresAt });
+    return toFallbackResult(models, expiresAt);
   };
 
   const pruneExpiredMemoryEntry = (
@@ -274,6 +349,8 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
           }
         }
 
+        // A live reading supersedes any placeholder this provider is serving.
+        fallbackCache.delete(provider);
         const entry = await setCacheEntry(provider, models);
         return {
           models,
@@ -284,8 +361,17 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
         await loadPersistedCache();
         const stale = getAnyExistingCacheEntry(provider);
         if (stale) {
+          // Returned untouched: no timestamps are rewritten and nothing is
+          // persisted, so a good snapshot survives a broken CLI indefinitely.
           return stale;
         }
+
+        if (isProviderModelsDiscoveryError(error)) {
+          // Nothing to fall back on, so the provider's built-in catalog answers
+          // — in memory only, and only until the short fallback TTL runs out.
+          return setFallbackCacheEntry(provider, error.fallback, now());
+        }
+
         throw error;
       })
       .finally(() => {
@@ -310,6 +396,24 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
             source: 'fresh' as const,
           },
         };
+      })
+      .catch((error) => {
+        // Uncached providers keep no snapshot to prefer, so a discovery failure
+        // can only be answered with the built-in catalog. Nothing is cached or
+        // persisted here — the next request probes the provider again.
+        if (isProviderModelsDiscoveryError(error)) {
+          const currentTime = now();
+          return {
+            models: error.fallback,
+            cache: {
+              updatedAt: new Date(currentTime).toISOString(),
+              expiresAt: new Date(currentTime).toISOString(),
+              source: 'fresh' as const,
+            },
+          };
+        }
+
+        throw error;
       })
       .finally(() => {
         pendingRequests.delete(provider);
@@ -338,12 +442,22 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
         return pendingRequest;
       }
 
+      // An explicit refresh deliberately ignores a parked fallback: the user
+      // asking for one is exactly the case worth re-probing the CLI for.
       return loadAndCacheModels(provider);
     }
 
-    const cachedModels = pruneExpiredMemoryEntry(provider, now(), 'memory');
+    const currentTime = now();
+    const cachedModels = pruneExpiredMemoryEntry(provider, currentTime, 'memory');
     if (cachedModels) {
       return cachedModels;
+    }
+
+    // Checked before the disk read: a parked fallback only exists because
+    // discovery already failed with no snapshot on disk to prefer.
+    const fallbackModels = readFallbackCacheEntry(provider, currentTime);
+    if (fallbackModels) {
+      return fallbackModels;
     }
 
     const pendingRequest = pendingRequests.get(provider);
@@ -507,6 +621,7 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
 
   const clearCache = (): void => {
     memoryCache.clear();
+    fallbackCache.clear();
     pendingRequests.clear();
     persistedCacheLoaded = false;
     persistedCacheLoadPromise = null;

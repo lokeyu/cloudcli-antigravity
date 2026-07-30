@@ -5,6 +5,7 @@ import path from 'node:path';
 import crossSpawn from 'cross-spawn';
 
 import type { IProviderModels } from '@/shared/interfaces.js';
+import { catalogOrFallback, ProviderModelsDiscoveryError } from '@/shared/provider-models-discovery.js';
 import type {
   ProviderCurrentActiveModel,
   ProviderModelOption,
@@ -216,26 +217,71 @@ const resolveCursorSessionStorePath = async (sessionId: string): Promise<string 
   return null;
 };
 
+/** Seam for tests: the real reader shells out to `cursor-agent --list-models`. */
+type CursorProviderModelsDependencies = {
+  listModels?: () => Promise<string>;
+};
+
 export class CursorProviderModels implements IProviderModels {
+  private readonly listModels: () => Promise<string>;
+
+  constructor(dependencies: CursorProviderModelsDependencies = {}) {
+    this.listModels = dependencies.listModels ?? runCursorListModels;
+  }
+
+  /**
+   * Reads the live catalog from `cursor-agent --list-models`.
+   *
+   * Rejects with `ProviderModelsDiscoveryError` whenever the CLI cannot be run,
+   * exits non-zero, times out, or prints nothing that parses as a model row. The
+   * built-in catalog rides along on the error instead of being returned here, so
+   * `providerModelsService` can prefer an existing snapshot over it. A partial
+   * reading is still a successful discovery: whatever rows parsed are returned.
+   */
   async getSupportedModels(): Promise<ProviderModelsDefinition> {
+    let stdout: string;
+
     try {
-      const stdout = await runCursorListModels();
-      const models = parseModelsOutput(stdout);
-      return buildCursorModelsDefinition(models);
-    } catch {
-      return CURSOR_FALLBACK_MODELS;
+      stdout = await this.listModels();
+    } catch (error) {
+      throw new ProviderModelsDiscoveryError(
+        CURSOR_FALLBACK_MODELS,
+        'Unable to discover Cursor models',
+        { cause: error },
+      );
     }
+
+    const models = parseModelsOutput(stdout);
+    if (models.length === 0) {
+      throw new ProviderModelsDiscoveryError(
+        CURSOR_FALLBACK_MODELS,
+        'cursor-agent --list-models listed no usable models',
+      );
+    }
+
+    return buildCursorModelsDefinition(models);
+  }
+
+  /**
+   * Reads the catalog for default-naming purposes only.
+   *
+   * `getCurrentActiveModel` needs a model name to fall back on, not proof that
+   * the CLI answered, so a failed discovery resolves to the built-in catalog
+   * here rather than propagating.
+   */
+  private async readCatalogForDefault(): Promise<ProviderModelsDefinition> {
+    return catalogOrFallback(() => this.getSupportedModels());
   }
 
   async getCurrentActiveModel(sessionId?: string): Promise<ProviderCurrentActiveModel> {
     if (!sessionId?.trim()) {
-      return buildDefaultProviderCurrentActiveModel(await this.getSupportedModels());
+      return buildDefaultProviderCurrentActiveModel(await this.readCatalogForDefault());
     }
 
     try {
       const storeDbPath = await resolveCursorSessionStorePath(sessionId);
       if (!storeDbPath) {
-        return buildDefaultProviderCurrentActiveModel(await this.getSupportedModels());
+        return buildDefaultProviderCurrentActiveModel(await this.readCatalogForDefault());
       }
 
       const { default: Database } = await import('better-sqlite3');
@@ -251,7 +297,7 @@ export class CursorProviderModels implements IProviderModels {
             ? Buffer.from(row.value.trim(), 'hex').toString('utf8')
             : '';
         if (!metadataText) {
-          return buildDefaultProviderCurrentActiveModel(await this.getSupportedModels());
+          return buildDefaultProviderCurrentActiveModel(await this.readCatalogForDefault());
         }
 
         const metadata = JSON.parse(metadataText) as { lastUsedModel?: string };
@@ -267,7 +313,7 @@ export class CursorProviderModels implements IProviderModels {
       // Fall through to the provider default when Cursor metadata cannot be read.
     }
 
-    return buildDefaultProviderCurrentActiveModel(await this.getSupportedModels());
+    return buildDefaultProviderCurrentActiveModel(await this.readCatalogForDefault());
   }
 }
 

@@ -14,7 +14,9 @@ import test from 'node:test';
 import {
   createProviderModelsService,
   PROVIDER_MODELS_CACHE_TTL_MS,
+  PROVIDER_MODELS_FALLBACK_TTL_MS,
 } from '@/modules/providers/services/provider-models.service.js';
+import { ProviderModelsDiscoveryError } from '@/shared/provider-models-discovery.js';
 import type {
   LLMProvider,
   ProviderCurrentActiveModel,
@@ -63,6 +65,23 @@ const writeCacheFile = async (
   entries: Record<string, ReturnType<typeof createCacheEntry>>,
 ): Promise<void> => {
   await writeFile(cachePath, `${JSON.stringify({ version: 2, entries }, null, 2)}\n`, 'utf8');
+};
+
+/** The built-in catalog one adapter carries on a discovery failure. */
+const createDiscoveryFailure = (model: string): ProviderModelsDiscoveryError =>
+  new ProviderModelsDiscoveryError(createModels(model), `discovery failed for ${model}`);
+
+/**
+ * Lets every already-queued cache write run to completion.
+ *
+ * Persistence is queued rather than awaited by the caller in some paths, so
+ * assertions about what did *not* reach disk have to give those writes a turn
+ * first — otherwise they would pass simply by running too early.
+ */
+const settlePendingWrites = async (): Promise<void> => {
+  for (let index = 0; index < 5; index += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
 };
 
 test('provider models service delegates to the resolved provider model adapter', async () => {
@@ -661,6 +680,251 @@ test('failed atomic rename preserves the previous cache file and cleans up the t
 
     assert.equal(await readFile(cachePath, 'utf8'), original);
     assert.deepEqual(await readdir(tempRoot), ['models-cache.json']);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------
+// Discovery failures: stale snapshots outrank built-in fallback catalogs
+
+test('a typed discovery failure returns the expired snapshot and leaves the cache file untouched', async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'provider-model-cache-typed-stale-'));
+  const cachePath = path.join(tempRoot, 'models-cache.json');
+  const snapshotUpdatedAt = 1_000;
+  const snapshotExpiresAt = snapshotUpdatedAt + PROVIDER_MODELS_CACHE_TTL_MS;
+  const currentTime = snapshotExpiresAt + 10_000;
+
+  try {
+    await writeCacheFile(cachePath, {
+      cursor: createCacheEntry('cursor-stale', snapshotUpdatedAt, snapshotExpiresAt),
+    });
+    const originalFile = await readFile(cachePath, 'utf8');
+
+    const service = createProviderModelsService({
+      cachePath,
+      now: () => currentTime,
+      resolveProvider: () => ({
+        models: {
+          getSupportedModels: async () => {
+            throw createDiscoveryFailure('cursor-builtin');
+          },
+          getCurrentActiveModel: async () => createCurrentActiveModel('cursor-active'),
+        },
+      }),
+    });
+
+    const result = await service.getProviderModels('cursor');
+    await settlePendingWrites();
+
+    assert.equal(result.models.DEFAULT, 'cursor-stale', 'the stale snapshot must win');
+    assert.notEqual(result.models.DEFAULT, 'cursor-builtin');
+    assert.equal(result.cache.source, 'disk');
+    assert.equal(result.cache.updatedAt, new Date(snapshotUpdatedAt).toISOString());
+    assert.equal(result.cache.expiresAt, new Date(snapshotExpiresAt).toISOString());
+    assert.equal(await readFile(cachePath, 'utf8'), originalFile);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('a typed discovery failure without any snapshot answers with the built-in catalog only', async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'provider-model-cache-typed-fallback-'));
+  const cachePath = path.join(tempRoot, 'models-cache.json');
+
+  try {
+    const service = createProviderModelsService({
+      cachePath,
+      now: () => 1_000,
+      resolveProvider: () => ({
+        models: {
+          getSupportedModels: async () => {
+            throw createDiscoveryFailure('cursor-builtin');
+          },
+          getCurrentActiveModel: async () => createCurrentActiveModel('cursor-active'),
+        },
+      }),
+    });
+
+    const result = await service.getProviderModels('cursor');
+    await settlePendingWrites();
+
+    assert.equal(result.models.DEFAULT, 'cursor-builtin');
+    assert.deepEqual(
+      await readdir(tempRoot),
+      [],
+      'a fallback must not be a reason to create the cache file',
+    );
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('a parked fallback never reaches disk when another provider persists a live catalog', async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'provider-model-cache-fallback-leak-'));
+  const cachePath = path.join(tempRoot, 'models-cache.json');
+
+  try {
+    const service = createProviderModelsService({
+      cachePath,
+      now: () => 1_000,
+      resolveProvider: (provider) => ({
+        models: {
+          getSupportedModels: async () => {
+            if (provider === 'cursor') {
+              throw createDiscoveryFailure('cursor-builtin');
+            }
+            return createModels('codex-live');
+          },
+          getCurrentActiveModel: async () => createCurrentActiveModel(`${provider}-active`),
+        },
+      }),
+    });
+
+    const cursorResult = await service.getProviderModels('cursor');
+    const codexResult = await service.getProviderModels('codex');
+    await settlePendingWrites();
+
+    assert.equal(cursorResult.models.DEFAULT, 'cursor-builtin');
+    assert.equal(codexResult.models.DEFAULT, 'codex-live');
+
+    const persisted = JSON.parse(await readFile(cachePath, 'utf8')) as {
+      entries: Record<string, { models: ProviderModelsDefinition }>;
+    };
+    assert.equal(persisted.entries.codex.models.DEFAULT, 'codex-live');
+    assert.deepEqual(Object.keys(persisted.entries), ['codex']);
+    assert.equal(persisted.entries.cursor, undefined);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('a parked fallback answers for its short ttl and then lets discovery run again', async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'provider-model-cache-fallback-ttl-'));
+  let currentTime = 1_000;
+  let loadCount = 0;
+
+  try {
+    const service = createProviderModelsService({
+      cachePath: path.join(tempRoot, 'models-cache.json'),
+      now: () => currentTime,
+      resolveProvider: () => ({
+        models: {
+          getSupportedModels: async () => {
+            loadCount += 1;
+            throw createDiscoveryFailure(`cursor-builtin-${loadCount}`);
+          },
+          getCurrentActiveModel: async () => createCurrentActiveModel('cursor-active'),
+        },
+      }),
+    });
+
+    const first = await service.getProviderModels('cursor');
+    assert.equal(loadCount, 1);
+    assert.equal(first.models.DEFAULT, 'cursor-builtin-1');
+
+    currentTime += PROVIDER_MODELS_FALLBACK_TTL_MS - 1;
+    const withinTtl = await service.getProviderModels('cursor');
+    assert.equal(loadCount, 1, 'a parked fallback must not re-run discovery');
+    assert.equal(withinTtl.models.DEFAULT, 'cursor-builtin-1');
+
+    currentTime += 2;
+    const afterTtl = await service.getProviderModels('cursor');
+    assert.equal(loadCount, 2, 'discovery must be retried once the fallback ttl elapses');
+    assert.equal(afterTtl.models.DEFAULT, 'cursor-builtin-2');
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('parallel requests share one failed discovery and receive the same stale result', async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'provider-model-cache-parallel-failure-'));
+  const cachePath = path.join(tempRoot, 'models-cache.json');
+  const currentTime = PROVIDER_MODELS_CACHE_TTL_MS + 10_000;
+  let loadCount = 0;
+
+  try {
+    await writeCacheFile(cachePath, {
+      cursor: createCacheEntry('cursor-stale', 1_000, 1_000 + PROVIDER_MODELS_CACHE_TTL_MS),
+    });
+
+    const service = createProviderModelsService({
+      cachePath,
+      now: () => currentTime,
+      resolveProvider: () => ({
+        models: {
+          getSupportedModels: async () => {
+            loadCount += 1;
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            throw createDiscoveryFailure('cursor-builtin');
+          },
+          getCurrentActiveModel: async () => createCurrentActiveModel('cursor-active'),
+        },
+      }),
+    });
+
+    const [first, second] = await Promise.all([
+      service.getProviderModels('cursor'),
+      service.getProviderModels('cursor'),
+    ]);
+
+    assert.equal(loadCount, 1, 'both callers must share one discovery attempt');
+    assert.equal(first, second, 'both callers must observe the very same result');
+    assert.equal(first.models.DEFAULT, 'cursor-stale');
+    assert.equal(first.cache.source, 'disk');
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('an untyped provider error without any snapshot still propagates', async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'provider-model-cache-untyped-'));
+
+  try {
+    const service = createProviderModelsService({
+      cachePath: path.join(tempRoot, 'models-cache.json'),
+      resolveProvider: () => ({
+        models: {
+          getSupportedModels: async () => {
+            throw new Error('unexpected adapter crash');
+          },
+          getCurrentActiveModel: async () => createCurrentActiveModel('cursor-active'),
+        },
+      }),
+    });
+
+    await assert.rejects(
+      () => service.getProviderModels('cursor'),
+      /unexpected adapter crash/,
+    );
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('an uncached provider answers a typed discovery failure with the built-in catalog', async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'provider-model-cache-uncached-typed-'));
+
+  try {
+    const service = createProviderModelsService({
+      cachePath: path.join(tempRoot, 'models-cache.json'),
+      now: () => 1_000,
+      resolveProvider: () => ({
+        models: {
+          getSupportedModels: async () => {
+            throw createDiscoveryFailure('claude-builtin');
+          },
+          getCurrentActiveModel: async () => createCurrentActiveModel('claude-active'),
+        },
+      }),
+    });
+
+    const result = await service.getProviderModels('claude');
+    await settlePendingWrites();
+
+    assert.equal(result.models.DEFAULT, 'claude-builtin');
+    assert.equal(result.cache.source, 'fresh');
+    assert.deepEqual(await readdir(tempRoot), [], 'uncached providers must not persist anything');
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
